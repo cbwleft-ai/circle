@@ -15,7 +15,7 @@ import { SchedulerAgent } from "../agents/scheduler.js";
 import { WorkerAgent } from "../agents/worker.js";
 import { LONG_TASK_PATTERNS, type AppConfig } from "../config.js";
 import { log } from "../core/logger.js";
-import { assessSafety, REFUSAL_DESTRUCTIVE, REFUSAL_SENSITIVE } from "../core/safety.js";
+import { assessSafety, REFUSAL_DESTRUCTIVE, REFUSAL_SENSITIVE, WARNING_CONFIG_STRUCTURE } from "../core/safety.js";
 import { ScheduleStore } from "../core/schedule-store.js";
 import { TaskStore } from "../core/task-store.js";
 import type {
@@ -115,6 +115,11 @@ export class AgentTeam implements TeamGateway {
       await this.outbox(msg.chatId, REFUSAL_SENSITIVE);
       return;
     }
+    if (verdict.risk === "warning") {
+      // 配置结构/格式/字段调研：放行（不拦截），但提示仅限结构、禁止读取真实值
+      log.warn("safety", `配置结构类请求放行（warning）: ${msg.text.slice(0, 100)} → ${verdict.reasons[0]}`);
+      await this.outbox(msg.chatId, WARNING_CONFIG_STRUCTURE);
+    }
 
     // 2) Coordinator 处理
     const reply = await this.enqueueCoordinator(() => this.coordinator.respond(msg.text));
@@ -168,6 +173,10 @@ export class AgentTeam implements TeamGateway {
     if (verdict.risk === "sensitive") {
       log.warn("safety", `派发拦截（敏感）: ${title}`);
       return { ok: false, reasons: verdict.reasons, message: REFUSAL_SENSITIVE };
+    }
+    if (verdict.risk === "warning") {
+      // 配置结构/格式/字段调研：派发入口放行，记录提示
+      log.warn("safety", `派发放行（配置结构类 warning）: ${title} → ${verdict.reasons[0]}`);
     }
 
     const worker = this.workers.get(workerName);
