@@ -75,16 +75,37 @@ export interface WorkerConfig {
   skills?: string[];
 }
 
+/** 对话附件（图片/文件） */
+export interface ChatAttachment {
+  /** 附件类型 */
+  kind: "image" | "file";
+  /** 附件名称（含扩展名），用于落盘 */
+  name?: string;
+  /** MIME 类型（如 image/png） */
+  mimeType?: string;
+  /** 附件二进制内容（base64 编码），由适配器下载/编码后填充 */
+  data?: string;
+  /** 若已由适配器/调用方落盘，可直接提供本地路径 */
+  localPath?: string;
+}
+
 /** 对话消息（IM 层与团队层之间的统一结构） */
 export interface ChatMessage {
   chatId: string;
   text: string;
+  /** 对话附件（图片/文件），可选。图片消息不再仅返回占位文本，而是携带真实图片数据。 */
+  attachments?: ChatAttachment[];
 }
 
 /** 安全评估结论 */
 export interface SafetyVerdict {
-  /** none: 安全; sensitive: 涉及敏感信息; destructive: 破坏性操作 */
-  risk: "none" | "sensitive" | "destructive";
+  /**
+   * none: 安全;
+   * warning: 提及敏感字段但为「配置结构/格式/字段」调研上下文，放行但提示（禁止读取真实值）;
+   * sensitive: 涉及敏感信息（读取/返回真实私密值）;
+   * destructive: 破坏性操作。
+   */
+  risk: "none" | "warning" | "sensitive" | "destructive";
   /** 判定原因（供用户查看） */
   reasons: string[];
 }

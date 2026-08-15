@@ -6,7 +6,7 @@
  * - GET  /ping                             存活检查（用于网关校验）
  */
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import type { ChatMessage } from "../core/types.js";
+import type { ChatAttachment, ChatMessage } from "../core/types.js";
 import { log } from "../core/logger.js";
 import type { ImAdapter } from "./adapter.js";
 
@@ -40,15 +40,24 @@ export class HttpAdapter implements ImAdapter {
     }
     if (req.method === "POST" && url.pathname === "/message") {
       const body = await readBody(req);
-      const { chatId, text } = JSON.parse(body) as { chatId?: string; text?: string };
-      if (!chatId || !text) {
-        writeJson(res, 400, { ok: false, error: "需要 chatId 与 text 字段" });
+      const parsed = JSON.parse(body) as {
+        chatId?: string;
+        text?: string;
+        attachments?: ChatAttachment[];
+      };
+      const { chatId, text } = parsed;
+      const attachments = Array.isArray(parsed.attachments) ? parsed.attachments : undefined;
+      if (!chatId || (!text && (!attachments || attachments.length === 0))) {
+        writeJson(res, 400, {
+          ok: false,
+          error: "需要 chatId 与 text 字段（或至少一个附件 attachments）",
+        });
         return;
       }
       // 异步处理，立即返回 202
       const cb = this.handler;
       if (cb) {
-        setImmediate(() => cb({ chatId, text }));
+        setImmediate(() => cb({ chatId, text: text ?? "", attachments }));
       }
       writeJson(res, 202, { ok: true, received: true });
       return;

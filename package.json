@@ -13,6 +13,7 @@
     "build": "tsc -p tsconfig.json",
     "test": "tsx test/run.ts",
     "test:unit": "tsx test/unit.test.ts",
+    "test:multimodal": "tsx test/multimodal.test.ts",
     "test:case1": "tsx test/case1-long-task.test.ts",
     "test:case2": "tsx test/case2-scheduled-task.test.ts",
     "test:case3": "tsx test/case3-safety-intercept.test.ts",

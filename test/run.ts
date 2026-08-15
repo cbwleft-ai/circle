@@ -14,6 +14,7 @@ import { runCase1 } from "./case1-long-task.test.js";
 import { runCase2 } from "./case2-scheduled-task.test.js";
 import { runCase3 } from "./case3-safety-intercept.test.js";
 import { runWeixinIlinkTests } from "./weixin-ilink.test.js";
+import { runMultimodalTests } from "./multimodal.test.js";
 import { renderReport, type TestResult } from "./helpers.js";
 
 const REPORT_PATH = join(import.meta.dirname, "TEST_REPORT.md");
@@ -37,6 +38,7 @@ async function main() {
   const all: TestResult[] = [];
   all.push(...(await runUnitTests()));
   all.push(...(await runWeixinIlinkTests()));
+  all.push(...(await runMultimodalTests()));
   all.push(...(await runCase1()));
   all.push(...(await runCase2()));
   all.push(...(await runCase3()));

@@ -41,6 +41,27 @@ export CIRCLE_MODEL_ID=deepseek-v4-flash # 默认 deepseek-v4-flash
 > 模型注册信息（baseUrl、compat 等）可放在 `CIRCLE_AGENT_DIR/models.json` 中，
 > 本项目已针对 DeepSeek V4 Flash 内置了 provider 配置。
 
+### 2.3 配置多模态（视觉）模型
+
+默认模型 DeepSeek V4 Flash 仅支持文本输入。若要支持**图片/视觉输入**（用户发图 →
+Worker 真正“看图”），请配置一个支持图片输入的视觉模型：
+
+```bash
+# 方式一：单独指定视觉模型（推荐）
+export CIRCLE_VISION_MODEL_PROVIDER=openai     # 视觉模型 provider
+CIRCLE_VISION_MODEL_ID=gpt-4o                  # 视觉模型 id（input 含 image）
+# 方式二：直接切换默认模型为视觉模型
+# CIRCLE_MODEL_PROVIDER=openai / CIRCLE_MODEL_ID=gpt-4o
+```
+
+模型注册与凭据放在 `~/.pi/agent/models.json` / `auth.json`（pi 内置目录已含
+775 个支持图片输入的视觉模型，如 openai/gpt-4o、google/gemini-2.5-flash、
+openrouter/qwen3-vl 系列等，详见 pi 的模型目录）。
+
+> 视觉模型仅在“图片/视觉类任务”（描述命中 图片/读图/OCR/视觉 等关键词，或任务带
+> `【图片】` 标记）时由 Worker 自动选用；普通任务仍使用默认模型。
+> 修改模型配置后需重启 Circle 服务。
+
 ### 2.3 启动
 
 ```bash
@@ -100,7 +121,24 @@ Coordinator：🕐 T-20260813-0002 [long] 写脚本…（Worker: default, 状态
 
 > Coordinator 每 5 轮对话会自动检查一次待办任务状态并汇报进展。
 
-### 3.6 安全拦截（示例）
+### 3.6 图片消息（多模态）
+
+用户在 IM 中发送图片后，Circle 会把图片保存到 `{dataDir}/uploads/`，并在消息中标注
+`【图片】<路径>` 后交给 Coordinator；Coordinator 自动派发任务给 Worker 读取并描述图片
+（识别图中文字 OCR）。若已配置视觉模型（见 §2.3），Worker 即可真正看到图片内容：
+
+```
+你：（发送一张图片，可选附文字“描述这张图片的内容 / 识别图中文字”）
+Coordinator：已派发图片识别任务…
+Coordinator：任务 T-… 已完成：图片路径 …，识别结果：…
+```
+
+- 未配置视觉模型时，Worker 会明确告知“当前模型不支持视觉”，并尽力提供图片元信息或 OCR 结果；
+- 每个 Worker 工作目录自带视觉技能 `vision.md`（`data/workspaces/<worker>/.pi/skills/`），
+  描述图片/OCR 的标准做法；
+- HTTP 网关可用 `POST /message` 携带 `attachments` 字段上行图片（见 §5）。
+
+### 3.7 安全拦截（示例）
 
 ```
 你：请删除运行目录下的所有文件。
@@ -169,7 +207,7 @@ npm start
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | `GET` | `/health` | 健康检查 |
-| `POST` | `/message` | 上行消息 `{"chatId":"u1","text":"你好"}`（202 接受） |
+| `POST` | `/message` | 上行消息 `{"chatId":"u1","text":"你好"}` 或携带附件 `{"chatId":"u1","attachments":[{"kind":"image","name":"a.png","mimeType":"image/png","data":"<base64>"}]}`（202 接受） |
 | `GET` | `/ping` | 网关回调校验 |
 
 下行消息通过 `HttpAdapter.downstreamHook` 回调输出（可对接各平台机器人 webhook），
@@ -183,6 +221,8 @@ npm start
 | `CIRCLE_AGENT_DIR` | `~/.pi/agent` | pi 配置目录（模型/凭据） |
 | `CIRCLE_MODEL_PROVIDER` | `deepseek` | 模型 provider |
 | `CIRCLE_MODEL_ID` | `deepseek-v4-flash` | 模型 id |
+| `CIRCLE_VISION_MODEL_PROVIDER` | 同 `CIRCLE_MODEL_PROVIDER` | 视觉模型 provider（图片/视觉任务） |
+| `CIRCLE_VISION_MODEL_ID` | 同 `CIRCLE_MODEL_ID` | 视觉模型 id（需支持图片输入） |
 | `CIRCLE_COORDINATOR_THINKING` | `low` | Coordinator 思考级别 |
 | `CIRCLE_WORKER_THINKING` | `high` | Worker 思考级别 |
 | `CIRCLE_LONG_TASK_SEC` | `10` | 长程任务判定阈值（秒） |

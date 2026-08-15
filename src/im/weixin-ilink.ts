@@ -16,7 +16,7 @@
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { log } from "../core/logger.js";
-import type { ChatMessage } from "../core/types.js";
+import type { ChatAttachment, ChatMessage } from "../core/types.js";
 import type { ImAdapter } from "./adapter.js";
 
 // ============================================================================
@@ -99,6 +99,8 @@ interface WeixinMessageItem {
   type?: number;
   text_item?: { text?: string };
   voice_item?: { text?: string };
+  /** 图片消息（type=2），url 为图片下载地址 */
+  image_item?: { url?: string; md5?: string; name?: string; [k: string]: unknown };
 }
 
 interface WeixinMessage {
@@ -318,7 +320,7 @@ export class WeixinIlinkAdapter implements ImAdapter {
         if (resp.get_updates_buf) this.getUpdatesBuf = resp.get_updates_buf;
         if (resp.msgs?.length) {
           for (const msg of resp.msgs as WeixinMessage[]) {
-            this.handleIncoming(msg);
+            void this.handleIncoming(msg);
           }
         }
       } catch (err) {
@@ -331,16 +333,27 @@ export class WeixinIlinkAdapter implements ImAdapter {
     }
   }
 
-  private handleIncoming(msg: WeixinMessage): void {
+  private async handleIncoming(msg: WeixinMessage): Promise<void> {
     // 忽略自己发送的消息（BOT 类型）
     if (msg.message_type === 2) return;
     const fromUserId = msg.from_user_id;
     if (!fromUserId) return;
 
-    const text = extractText(msg);
-    if (!text) return;
+    let text = extractText(msg);
+    // 多模态：尝试提取图片附件（下载为 base64）
+    const attachments = await extractAttachments(msg, this.apiBaseUrl, this.token);
+    const hasImage = (msg.item_list ?? []).some((i) => i.type === 2);
+    if (!text && attachments.length === 0 && hasImage) {
+      // 附件提取失败的兜底占位
+      text = "[收到图片消息]";
+    }
+    if (!text && attachments.length === 0) return;
 
-    this.handler?.({ chatId: `wx:${fromUserId}`, text });
+    this.handler?.({
+      chatId: `wx:${fromUserId}`,
+      text,
+      attachments: attachments.length > 0 ? attachments : undefined,
+    });
   }
 
   async send(chatId: string, text: string): Promise<void> {
@@ -384,12 +397,75 @@ function extractText(msg: WeixinMessage): string {
       return item.voice_item.text;
     }
   }
-  // 非文本消息给出占位描述
-  const hasImage = items.some((i) => i.type === 2);
+  // 非文本消息：图片/文件由附件链路携带，不再返回占位文本（由团队层富化）
   const hasFile = items.some((i) => i.type === 4);
-  if (hasImage) return "[收到图片消息]";
   if (hasFile) return "[收到文件消息]";
   return "";
+}
+
+/** 从消息中提取图片附件（下载为 base64），失败静默跳过 */
+async function extractAttachments(
+  msg: WeixinMessage,
+  baseUrl: string,
+  token?: string,
+): Promise<ChatAttachment[]> {
+  const items = msg.item_list ?? [];
+  const out: ChatAttachment[] = [];
+  for (const item of items) {
+    if (item.type === 2 && item.image_item?.url) {
+      const url = item.image_item.url;
+      const img = await downloadImage(baseUrl, url, token);
+      if (img) {
+        out.push({
+          kind: "image",
+          name: item.image_item.name ?? basenameFromUrl(url),
+          mimeType: img.mimeType,
+          data: img.data,
+        });
+      } else {
+        log.warn("im:weixin", `图片下载失败，跳过附件: ${url.slice(0, 80)}`);
+      }
+    }
+  }
+  return out;
+}
+
+async function downloadImage(
+  baseUrl: string,
+  url: string,
+  token?: string,
+): Promise<{ data: string; mimeType?: string } | undefined> {
+  const full = /^https?:\/\//i.test(url)
+    ? url
+    : `${baseUrl.replace(/\/$/, "")}${url.startsWith("/") ? url : `/${url}`}`;
+  // 先按普通 URL 拉取（微信 CDN 多为签名 URL，无需 bot 鉴权），失败再带鉴权头重试
+  for (const headers of [undefined, buildHeaders(token)]) {
+    try {
+      const res = await fetch(full, {
+        headers,
+        signal: AbortSignal.timeout(15000),
+      });
+      if (!res.ok) continue;
+      const buf = Buffer.from(await res.arrayBuffer());
+      return {
+        data: buf.toString("base64"),
+        mimeType: res.headers.get("content-type") ?? undefined,
+      };
+    } catch {
+      /* 尝试下一种方式 */
+    }
+  }
+  return undefined;
+}
+
+function basenameFromUrl(url: string): string | undefined {
+  try {
+    const path = new URL(url).pathname;
+    const seg = path.split("/").filter(Boolean).pop();
+    return seg || undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function filterMarkdown(text: string): string {

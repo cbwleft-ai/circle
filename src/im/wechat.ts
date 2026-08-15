@@ -66,8 +66,6 @@ export class WechatAdapter implements ImAdapter {
     this.bot.on("message", async (message: any) => {
       try {
         if (message.self()) return;
-        if (message.type() !== this.bot.Message.Type.Text) return;
-        const text = message.text();
         const room = message.room();
         const contact = message.talker();
         const chatId = room ? `room:${room.id}` : `contact:${contact.id}`;
@@ -80,7 +78,31 @@ export class WechatAdapter implements ImAdapter {
             return;
           }
         }
-        this.handler?.({ chatId, text });
+
+        const type = message.type();
+        if (type === this.bot.Message.Type.Text) {
+          const text = message.text();
+          this.handler?.({ chatId, text });
+          return;
+        }
+        // 多模态：图片消息 → 附件（base64），不再只返回占位
+        if (type === this.bot.Message.Type.Image) {
+          const fileBox = await message.toFileBox();
+          const buf = await fileBox.toBuffer();
+          this.handler?.({
+            chatId,
+            text: "",
+            attachments: [
+              {
+                kind: "image",
+                name: fileBox.name ?? "image",
+                mimeType: fileBox.mimeType ?? "image/jpeg",
+                data: buf.toString("base64"),
+              },
+            ],
+          });
+          return;
+        }
       } catch (e) {
         log.error("im:wechat", `消息处理异常: ${(e as Error).message}`);
       }

@@ -58,9 +58,12 @@ Circle 采用「单一入口 + 角色分离」的协作架构。使用者只感�
 
 - 每个 Worker 一个注册项（名称/职责描述/工作目录/技能），拥有**独立持久工作环境**：
   - 工作目录：`data/workspaces/<workerName>/`，产出物直接输出到此（便于取用）；
-  - 技能：工作目录下 `.pi/skills/` 的 SKILL.md 自动发现加载，也可在配置中指定文件；
+  - 技能：工作目录下 `.pi/skills/` 的 SKILL.md 自动发现加载（含内置视觉技能 vision.md），
+    也可在配置中指定文件；
   - 临时工作空间：`data/workspaces/<workerName>/.scratch/<taskId>/`（任务级隔离）；
 - 每个任务使用**独立 LLM 会话**（上下文干净），但共享该 Worker 的工作环境；
+- **多模态**：图片/视觉类任务（命中视觉关键词或带 `【图片】` 标记）自动选用配置的
+  视觉模型（`CIRCLE_VISION_MODEL_PROVIDER/ID`），read 工具读图时图片作为附件传给模型；
 - 短程任务：执行后直接返回结果；长程任务：团队先下发 ack，执行完成后再反馈；
 - 单任务超时保护（默认 30 分钟，可配置）。
 
@@ -115,6 +118,19 @@ Circle 采用「单一入口 + 角色分离」的协作架构。使用者只感�
       └─（若 LLM 误判仍尝试派发）→ dispatch 入口二次安全复核 → 拒绝
 ```
 
+### 3.5 图片消息（多模态）
+
+```
+用户发图 ─► IM 适配器提取附件（ChatMessage.attachments）
+      ─► AgentTeam：落盘到 {dataDir}/uploads/，并以「【图片】<路径>」富化消息文本
+      ─► Coordinator：识别图片标记 → 派发视觉任务给 Worker
+      ─► Worker：read 工具读图（视觉模型下图片作为附件传给模型）→ 描述/OCR
+      ─► Coordinator 整理结果 → 用户
+```
+
+- 纯图片（无文字）消息不再返回 `[收到图片消息]` 占位文本，而是真正进入视觉链路；
+- 未配置视觉模型时，Worker 明确告知“不支持看图”，并尽力提供元信息/OCR 结果。
+
 ## 4. 关键模块
 
 | 模块 | 文件 | 说明 |
@@ -125,8 +141,10 @@ Circle 采用「单一入口 + 角色分离」的协作架构。使用者只感�
 | 任务存储 | `src/core/task-store.ts` | JSON 持久化、状态机、30 天清理 |
 | 定时任务存储 | `src/core/schedule-store.ts` | JSON 持久化、触发历史 |
 | 工作空间 | `src/core/workspace.ts` | Worker 目录/任务临时空间/过期清理 |
+| 附件落盘 | `src/core/upload.ts` | `AttachmentStore`（附件 → uploads）+ 消息富化 |
+| 视觉技能 | `src/skills/vision.md` | 内置图片/OCR 技能，安装到各 Worker `.pi/skills/` |
 | IM 适配器 | `src/im/*` | 统一接口，console/http/weixin(官方)/wechat(wechaty) 四实现 |
-| 团队 | `src/team/agent-team.ts` | 组合三角色、消息路由、轮次状态检查、结果汇报 |
+| 团队 | `src/team/agent-team.ts` | 组合三角色、消息路由、附件落盘、轮次状态检查、结果汇报 |
 
 ## 5. 数据模型
 
@@ -137,6 +155,9 @@ Task: id / title / description / status(received→dispatched→running→comple
 
 ScheduledTask: id / name / cron(5段) / description / workerName / enabled
                / createdAt / lastRunAt / nextRunAt / taskIds[]
+
+ChatMessage: chatId / text / attachments?: ChatAttachment[]
+ChatAttachment: kind(image|file) / name? / mimeType? / data?(base64) / localPath?
 ```
 
 ## 6. 安全边界（实现层面）

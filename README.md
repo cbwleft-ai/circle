@@ -31,6 +31,7 @@
 ## 技术选型
 
 - **Agent 框架**：Pi Agent SDK（`@earendil-works/pi-coding-agent`）+ **DeepSeek V4 Flash**（OpenAI 兼容 API，已内置 provider 配置）
+- **多模态**：支持配置视觉模型（`CIRCLE_VISION_MODEL_PROVIDER/ID`），图片消息经 IM 附件链路落盘后由 Worker 读取并描述/OCR（内置 vision 技能）
 - **IM 框架**：微信 AI 机器人（官方 iLink 通道，扫码登录；另备 wechaty 旧方案）；内置 控制台 / HTTP 适配器便于演示与集成
 - **运行时**：Node.js ≥ 20，TypeScript（ESM）
 
@@ -82,14 +83,15 @@ CIRCLE_LLM_TESTS=0 npm test   # 仅运行确定性用例（无需 API key）
 circle/
 ├── src/
 │   ├── index.ts               # 入口：装配 AgentTeam + IM 适配器
-│   ├── config.ts              # 配置与环境变量
-│   ├── core/                  # 基础设施：类型/日志/cron/安全/存储/工作空间
+│   ├── config.ts              # 配置与环境变量（含视觉模型配置）
+│   ├── core/                  # 基础设施：类型/日志/cron/安全/存储/工作空间/附件落盘
 │   ├── agents/                # Coordinator / Worker / Scheduler 三角色
+│   ├── skills/vision.md       # 内置视觉/OCR 技能（安装到各 Worker .pi/skills/）
 │   ├── team/                  # AgentTeam 组合与任务路由
 │   └── im/                    # IM 适配器：console / http / weixin(官方) / wechat(wechaty)
 ├── test/                      # 自动化测试与报告
 ├── docs/                      # 文档
-└── data/                      # 运行时数据（任务/定时任务/工作空间，自动生成）
+└── data/                      # 运行时数据（任务/定时任务/工作空间/uploads，自动生成）
 ```
 
 ## 安全设计要点

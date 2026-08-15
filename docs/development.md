@@ -19,18 +19,24 @@ src/
 │   └── workspace.ts       # Worker 工作空间与任务临时空间管理
 ├── agents/
 │   ├── coordinator.ts     # Coordinator LLM 会话 + 自定义工具 + 系统提示词
-│   ├── worker.ts          # Worker LLM 会话（按任务创建）+ 技能加载
+│   ├── worker.ts          # Worker LLM 会话（按任务创建）+ 视觉模型解析 + 技能加载
 │   └── scheduler.ts       # Scheduler 确定性定时触发 + 每日清理
 ├── team/
 │   ├── gateway.ts         # TeamGateway 接口（Coordinator 工具的边界）
-│   └── agent-team.ts      # AgentTeam：组合角色、消息路由、安全拦截、结果汇报
-└── im/
-    ├── adapter.ts         # ImAdapter 接口
-    ├── console.ts         # 控制台适配器
-    ├── http.ts            # HTTP 适配器
-    ├── weixin-ilink.ts    # 微信官方 iLink 通道适配器（推荐）
-    ├── wechat.ts          # 微信 wechaty 适配器（旧方案，不推荐）
-    └── test.ts            # 测试内存适配器
+│   └── agent-team.ts      # AgentTeam：组合角色、消息路由、安全拦截、结果汇报、附件落盘
+├── im/
+│   ├── adapter.ts         # ImAdapter 接口
+│   ├── console.ts         # 控制台适配器
+│   ├── http.ts            # HTTP 适配器（/message 支持 attachments 上行）
+│   ├── weixin-ilink.ts    # 微信官方 iLink 通道适配器（图片消息 → 附件）
+│   ├── wechat.ts          # 微信 wechaty 适配器（旧方案，不推荐，图片消息 → 附件）
+│   └── test.ts            # 测试内存适配器
+├── core/
+│   ├── types.ts           # 共享类型（ChatMessage.attachments / ChatAttachment）
+│   ├── upload.ts          # 附件落盘（AttachmentStore）与消息富化（buildMessageWithAttachments）
+│   └── workspace.ts       # Worker 工作空间与任务临时空间管理
+└── skills/
+    └── vision.md          # 内置视觉/OCR 技能（安装到各 Worker .pi/skills/）
 ```
 
 ## 2. 核心扩展点
@@ -98,6 +104,22 @@ export interface ImAdapter {
 本项目默认 DeepSeek V4 Flash（OpenAI 兼容），更换模型只需调整环境变量
 `CIRCLE_MODEL_PROVIDER` / `CIRCLE_MODEL_ID`（该模型需支持函数调用）。
 
+### 2.7 多模态（图片/视觉输入）
+
+链路：`IM 适配器提取图片附件 → ChatMessage.attachments → AgentTeam 落盘到
+{dataDir}/uploads/ 并以【图片】<路径> 富化文本 → Coordinator 派发视觉任务 →
+Worker 用 read 工具读图（视觉模型下图片作为附件传给模型）`。
+
+- **附件类型**：`src/core/types.ts` 的 `ChatAttachment`（kind/name/mimeType/data/localPath）；
+- **落盘**：`src/core/upload.ts` 的 `AttachmentStore.save()` 与 `buildMessageWithAttachments()`；
+- **视觉模型**：`CIRCLE_VISION_MODEL_PROVIDER` / `CIRCLE_VISION_MODEL_ID`（`src/config.ts`），
+  图片/视觉类任务由 `WorkerAgent.resolveModel()` 自动选用；能力判定见 `supportsVision()`；
+- **视觉技能**：内置 `src/skills/vision.md`，Worker 启动时安装到
+  `data/workspaces/<worker>/.pi/skills/vision.md` 并自动发现（`WorkerAgent.ensureWorkspace/loadSkills`）；
+- **IM 适配器**：`weixin-ilink.ts`（图片 item → 下载为 base64 附件）、`http.ts`（/message
+  attachments 字段）、`wechat.ts`（图片消息 → FileBox 附件）；
+- 新增 IM 通道时，只需把图片以 `ChatMessage.attachments` 传入，团队层即可自动处理。
+
 ## 3. 关键设计约定
 
 | 约定 | 原因 |
@@ -151,6 +173,7 @@ pi.registerProvider("my-llm", {
 ## 5. 测试开发
 
 - 单元测试：`test/unit.test.ts`（确定性，无 API key 也可运行）；
+- 多模态测试：`test/multimodal.test.ts`（M-01~M-06 确定性，M-07 端到端需 LLM）；
 - 端到端用例：`test/case1-long-task.test.ts`（长程/短程任务）、
   `test/case2-scheduled-task.test.ts`（定时任务）、
   `test/case3-safety-intercept.test.ts`（安全拦截）；

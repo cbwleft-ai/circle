@@ -25,6 +25,7 @@ import type {
   Task,
   WorkerConfig,
 } from "../core/types.js";
+import { AttachmentStore, buildMessageWithAttachments } from "../core/upload.js";
 import { WorkspaceManager } from "../core/workspace.js";
 import type { TeamGateway } from "./gateway.js";
 
@@ -41,6 +42,7 @@ export class AgentTeam implements TeamGateway {
   readonly taskStore: TaskStore;
   readonly scheduleStore: ScheduleStore;
   readonly workspace: WorkspaceManager;
+  readonly attachmentStore: AttachmentStore;
   readonly coordinator: CoordinatorAgent;
   readonly scheduler: SchedulerAgent;
   readonly workers = new Map<string, WorkerAgent>();
@@ -63,6 +65,7 @@ export class AgentTeam implements TeamGateway {
     this.taskStore = new TaskStore(this.config.dataDir);
     this.scheduleStore = new ScheduleStore(this.config.dataDir);
     this.workspace = new WorkspaceManager(`${this.config.dataDir}/workspaces`);
+    this.attachmentStore = new AttachmentStore(`${this.config.dataDir}/uploads`);
 
     for (const w of opts.workers) {
       const dir = this.workspace.workerDir(w.name);
@@ -103,21 +106,32 @@ export class AgentTeam implements TeamGateway {
     this.currentChatId = msg.chatId;
     this.turnCount++;
 
+    // 0) 多模态：保存图片/文件附件并把本地路径注入消息文本（图片消息不再返回占位文本）
+    const attachments = msg.attachments ?? [];
+    let text = msg.text ?? "";
+    if (attachments.length > 0) {
+      const saved = this.attachmentStore.save(msg.chatId, attachments);
+      text = buildMessageWithAttachments(text, saved);
+      if (saved.length > 0) {
+        log.info("team", `收到 ${saved.length} 个附件（${saved.map((s) => s.localPath).join(", ")}）`);
+      }
+    }
+
     // 1) 安全评估（确定性拦截，不经过 LLM，保证不可绕过）
-    const verdict = assessSafety(msg.text);
+    const verdict = assessSafety(text);
     if (verdict.risk === "destructive") {
-      log.warn("safety", `拦截破坏性请求: ${msg.text.slice(0, 100)}`);
+      log.warn("safety", `拦截破坏性请求: ${text.slice(0, 100)}`);
       await this.outbox(msg.chatId, REFUSAL_DESTRUCTIVE);
       return;
     }
     if (verdict.risk === "sensitive") {
-      log.warn("safety", `拦截敏感请求: ${msg.text.slice(0, 100)}`);
+      log.warn("safety", `拦截敏感请求: ${text.slice(0, 100)}`);
       await this.outbox(msg.chatId, REFUSAL_SENSITIVE);
       return;
     }
 
     // 2) Coordinator 处理
-    const reply = await this.enqueueCoordinator(() => this.coordinator.respond(msg.text));
+    const reply = await this.enqueueCoordinator(() => this.coordinator.respond(text));
     if (reply) await this.outbox(msg.chatId, reply);
 
     // 3) 每 N 轮对话检查一次待办任务状态（长程任务跟进）
