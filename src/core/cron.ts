@@ -2,6 +2,10 @@
  * 轻量 cron 解析器：支持 5 段 cron（分 时 日 月 周），
  * 支持 *、数字、范围、步长、逗号列表。
  * 用于 Scheduler 的定时触发与每日清理。
+ *
+ * 时区语义（issue #1）：cron 各字段（分/时/日/月/周）按【进程本地时区】解释。
+ * 用户按本地时间填写的 cron（如 `0 9 * * *` = 本地 09:00）将被正确解析，
+ * 不再按 UTC 解析导致触发时刻偏移（UTC+8 环境下晚 8 小时）。
  */
 
 export type CronField = { values: Set<number>; wildcard: boolean };
@@ -89,26 +93,27 @@ export function nextRun(cron: ParsedCron | string, from: Date = new Date()): Dat
   const SCAN_LIMIT = 366 * 24 * 60; // 最多向前扫描 1 年
 
   const candidate = new Date(from);
-  candidate.setUTCSeconds(0, 0);
+  candidate.setSeconds(0, 0);
 
+  // 全部使用本地时间字段（getFullYear/getMonth/getDate/getDay/getHours/getMinutes），
+  // 使 cron 的「分 时 日 月 周」按进程本地时区匹配，修复 UTC+8 晚 8 小时触发问题。
   for (let step = 0; step < SCAN_LIMIT; step++) {
-    const y = candidate.getUTCFullYear();
-    const m = candidate.getUTCMonth() + 1;
-    const d = candidate.getUTCDate();
-    const dow = candidate.getUTCDay(); // 0=周日
+    const m = candidate.getMonth() + 1;
+    const d = candidate.getDate();
+    const dow = candidate.getDay(); // 0=周日
 
     const monOk = monField.values.has(m);
     const domOk = domField.values.has(d);
     const dowOk = dowField.values.has(dow);
 
     if (monOk && (domOk || dowOk)) {
-      if (hourField.values.has(candidate.getUTCHours())) {
-        if (minField.values.has(candidate.getUTCMinutes())) {
+      if (hourField.values.has(candidate.getHours())) {
+        if (minField.values.has(candidate.getMinutes())) {
           return new Date(candidate);
         }
       }
     }
-    candidate.setUTCMinutes(candidate.getUTCMinutes() + 1);
+    candidate.setMinutes(candidate.getMinutes() + 1);
   }
   return undefined;
 }
@@ -117,11 +122,12 @@ export function nextRun(cron: ParsedCron | string, from: Date = new Date()): Dat
 export function matches(cron: ParsedCron | string, at: Date = new Date()): boolean {
   const parsed = typeof cron === "string" ? parseCron(cron) : cron;
   const [minField, hourField, domField, monField, dowField] = parsed.fields;
+  // 与 nextRun 一致：按进程本地时区匹配（修复 UTC 解析导致的 8 小时偏差）。
   return (
-    minField.values.has(at.getUTCMinutes()) &&
-    hourField.values.has(at.getUTCHours()) &&
-    domField.values.has(at.getUTCDate()) &&
-    monField.values.has(at.getUTCMonth() + 1) &&
-    dowField.values.has(at.getUTCDay())
+    minField.values.has(at.getMinutes()) &&
+    hourField.values.has(at.getHours()) &&
+    domField.values.has(at.getDate()) &&
+    monField.values.has(at.getMonth() + 1) &&
+    dowField.values.has(at.getDay())
   );
 }

@@ -71,20 +71,26 @@ export async function runUnitTests(): Promise<TestResult[]> {
   );
 
   results.push(
-    await runCase("U-08", "cron", "nextRun 计算（每天 10 点）", async (t) => {
-      const now = new Date("2025-01-01T09:00:00Z");
+    await runCase("U-08", "cron", "nextRun 计算（每天本地 10 点）", async (t) => {
+      const now = new Date(2025, 0, 1, 8, 0, 0); // 本地 2025-01-01 08:00
       const next = nextRun("0 10 * * *", now);
       t.assert(next !== undefined, "应能计算下次触发");
-      t.assert(next!.toISOString() === "2025-01-01T10:00:00.000Z", `期望 10:00，实际 ${next!.toISOString()}`);
+      t.assert(
+        next!.getHours() === 10 && next!.getMinutes() === 0,
+        `期望本地 10:00，实际本地 ${next!.getHours()}:${String(next!.getMinutes()).padStart(2, "0")}`,
+      );
+      t.assert(next!.getDate() === 1, "应为当天触发");
+      // 修复前按 UTC 解析会得到 10:00Z = 本地 18:00，晚 8 小时
+      t.assert(next!.getTime() !== new Date("2025-01-01T10:00:00Z").getTime(), "不应按 UTC 解析触发（晚 8 小时）");
     }),
   );
 
   results.push(
     await runCase("U-09", "cron", "nextRun 步长表达式（每 5 分钟）", async (t) => {
-      const now = new Date("2025-01-01T09:02:00Z");
+      const now = new Date(2025, 0, 1, 9, 2, 0); // 本地 09:02
       const next = nextRun("*/5 * * * *", now);
       t.assert(next !== undefined, "应能计算");
-      t.assert(next!.getUTCMinutes() === 5, `期望 :05，实际 :${next!.getUTCMinutes()}`);
+      t.assert(next!.getMinutes() === 5, `期望本地 :05，实际本地 :${next!.getMinutes()}`);
     }),
   );
 
@@ -101,9 +107,9 @@ export async function runUnitTests(): Promise<TestResult[]> {
   );
 
   results.push(
-    await runCase("U-11", "cron", "matches 判定（清理 cron 03:00）", async (t) => {
-      t.assert(matches("0 3 * * *", new Date("2025-01-01T03:00:00Z")), "03:00 应匹配");
-      t.assert(!matches("0 3 * * *", new Date("2025-01-01T04:00:00Z")), "04:00 不应匹配");
+    await runCase("U-11", "cron", "matches 判定（清理 cron 本地 03:00）", async (t) => {
+      t.assert(matches("0 3 * * *", new Date(2025, 0, 1, 3, 0, 0)), "本地 03:00 应匹配");
+      t.assert(!matches("0 3 * * *", new Date(2025, 0, 1, 4, 0, 0)), "本地 04:00 不应匹配");
     }),
   );
 
@@ -162,6 +168,36 @@ export async function runUnitTests(): Promise<TestResult[]> {
   } finally {
     rmSync(storeDir, { recursive: true, force: true });
   }
+
+  // ---------- issue #1：cron 时区偏差回归（本地时区 vs UTC） ----------
+  results.push(
+    await runCase("U-18", "cron", "issue#1 回归：本地 09:00 触发，不再晚 8 小时（nextRun）", async (t) => {
+      // 复现场景：本地 2025-01-01 00:00 起，cron "0 9 * * *" 应于当天本地 09:00 触发
+      const from = new Date(2025, 0, 1, 0, 0, 0);
+      const next = nextRun("0 9 * * *", from);
+      t.assert(next !== undefined, "应能计算下次触发");
+      const localMin = next!.getHours() * 60 + next!.getMinutes();
+      t.assert(localMin === 9 * 60, `应为本地 09:00，实际本地 ${next!.getHours()}:${String(next!.getMinutes()).padStart(2, "0")}`);
+      t.assert(next!.getDate() === 1, "应为当天本地 09:00 触发");
+      // 旧实现按 UTC 解析：09:00Z = 本地 17:00（晚 8 小时）
+      const buggyUtc = new Date("2025-01-01T09:00:00Z");
+      t.assert(next!.getTime() !== buggyUtc.getTime(), `不应触发于 09:00Z（=本地 17:00，晚 8 小时），实际 ${next!.toISOString()}`);
+      t.log(`nextRun("0 9 * * *", 本地 00:00) → ${next!.toLocaleString("zh-CN")}（本地 09:00，不再晚 8 小时）`);
+    }),
+  );
+
+  results.push(
+    await runCase("U-19", "cron", "issue#1 回归：matches 按本地时区判定", async (t) => {
+      // 本地 09:00 应匹配 "0 9 * * *"
+      t.assert(matches("0 9 * * *", new Date(2025, 0, 1, 9, 0, 0)), "本地 09:00 应匹配 0 9 * * *");
+      // 本地 17:00 不应匹配（旧逻辑按 UTC 会把本地 17:00 当作 09:00Z 误匹配）
+      t.assert(!matches("0 9 * * *", new Date(2025, 0, 1, 17, 0, 0)), "本地 17:00 不应匹配 0 9 * * *");
+      // 每日清理 cron 也按本地时间判定
+      t.assert(matches("0 3 * * *", new Date(2025, 0, 1, 3, 0, 0)), "本地 03:00 应匹配清理 cron");
+      t.assert(!matches("0 3 * * *", new Date(2025, 0, 1, 11, 0, 0)), "本地 11:00 不应匹配清理 cron");
+      t.log("matches 已按本地时区判定，旧 UTC 误匹配已消除");
+    }),
+  );
 
   // ---------- 定时任务存储 ----------
   results.push(
