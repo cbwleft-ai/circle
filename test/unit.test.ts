@@ -5,7 +5,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseCron, nextRun, matches } from "../src/core/cron.js";
+import { parseCron, nextRun, matches, isOneShot } from "../src/core/cron.js";
 import { assessSafety } from "../src/core/safety.js";
 import { TaskStore } from "../src/core/task-store.js";
 import { ScheduleStore } from "../src/core/schedule-store.js";
@@ -351,7 +351,7 @@ export async function runUnitTests(): Promise<TestResult[]> {
   );
 
   results.push(
-    await runCase("U-23", "Scheduler", "issue#2 一次性定时任务只触发一次（不再每天重复）", async (t) => {
+    await runCase("U-23", "Scheduler", "issue#2 一次性定时任务触发一次后自动停用（不再重复触发）", async (t) => {
       const dir = mkdtempSync(join(tmpdir(), "circle-unit-oneshot-"));
       try {
         const { SchedulerAgent } = await import("../src/agents/scheduler.js");
@@ -375,6 +375,7 @@ export async function runUnitTests(): Promise<TestResult[]> {
           description: "d",
           workerName: "dev",
         });
+        t.assert(isOneShot(s.cron), "该 cron 应被识别为一次性任务");
         t.assert(s.nextRunAt !== undefined, "创建后应计算下次触发");
         const firstIso = new Date(s.nextRunAt!).toISOString();
         t.assert(
@@ -387,21 +388,12 @@ export async function runUnitTests(): Promise<TestResult[]> {
         t.assert(fired.length === 1, "一次性任务应只触发 1 次");
 
         const after = store.get(s.id)!;
-        t.assert(after.nextRunAt !== undefined, "触发后应重算下次触发");
-        const nextIso = new Date(after.nextRunAt!).toISOString();
-        t.assert(
-          /08-14T01:28/.test(nextIso),
-          `触发后下次触发仍应为 8月14日 01:28（而非次日 8月15日），实际 ${nextIso}`,
-        );
-        // 旧 bug：下次触发变为「次日相同时间」（约 1 天）。修复后为同年剩余（<1天）或次年（>300 天），
-        // 绝不应是 1~2 天的每日重复。
-        const gapDays = (after.nextRunAt! - after.lastRunAt!) / 86_400_000;
-        t.assert(
-          gapDays > 300 || gapDays < 1,
-          `下次触发不应为次日重复（1~2 天），实际间隔 ${gapDays.toFixed(2)} 天`,
-        );
+        // 触发后自动停用：不再安排下次触发，也不会再被 tick 触发（修复：不再每日/次年重复）
+        t.assert(after.enabled === false, "一次性任务触发后应自动停用");
+        t.assert(after.nextRunAt === undefined, "一次性任务触发后不应再安排下次触发");
+        t.assert(after.taskIds.length === 1, "应记录 1 次触发历史");
 
-        // 模拟后续 tick：由于 nextRunAt 未到期，不应再次触发
+        // 模拟后续 tick：任务已停用且无 nextRunAt，不应再次触发
         const beforeTick = fired.length;
         await sched.tick();
         t.assert(fired.length === beforeTick, "后续 tick 不应再次触发一次性任务");
@@ -409,6 +401,18 @@ export async function runUnitTests(): Promise<TestResult[]> {
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }
+    }),
+  );
+
+  results.push(
+    await runCase("U-24", "cron", "isOneShot 识别一次性任务（dom+mon 均受限）", async (t) => {
+      t.assert(isOneShot("28 1 14 8 *") === true, "指定日+指定月（8月14日）应为一次性任务");
+      t.assert(isOneShot("0 10 14 8 *") === true, "指定日+指定月应为一次性任务");
+      t.assert(isOneShot("0 10 * * *") === false, "每日任务不是一次性");
+      t.assert(isOneShot("0 10 14 * *") === false, "每月 14 日不是一次性（日受限但月未受限）");
+      t.assert(isOneShot("0 10 * 8 *") === false, "8 月每天不是一次性（月受限但日未受限）");
+      t.assert(isOneShot("0 10 * * 1") === false, "每周一不是一次性");
+      t.log("isOneShot 仅在 dom 与 mon 均受限时返回 true");
     }),
   );
 

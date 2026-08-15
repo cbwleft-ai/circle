@@ -102,6 +102,17 @@ function dayMatches(domField: CronField, dowField: CronField, d: number, dow: nu
 }
 
 /**
+ * 判断 cron 是否为「一次性任务」：dom（日）与 mon（月）均受限 → 每年仅一个具体日期。
+ * 一次性任务触发后应由 Scheduler 自动停用，避免次年重复触发（issue #2）。
+ */
+export function isOneShot(cron: ParsedCron | string): boolean {
+  const parsed = typeof cron === "string" ? parseCron(cron) : cron;
+  const [, , domField, monField] = parsed.fields;
+  // dom 0..31 全覆盖=32 个取值，mon 1..12 全覆盖=12 个取值；受限即未全覆盖
+  return domField.values.size < 32 && monField.values.size < 12;
+}
+
+/**
  * 计算 cron 在 from（严格之后）的下一次触发时间。
  * 返回时刻严格晚于 from：若起始分钟恰好命中（如触发后立即重算），
  * 会跳过该分钟，避免同一分钟内被重复触发（issue #2 重复触发的一部分）。

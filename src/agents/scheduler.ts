@@ -7,7 +7,7 @@
  * 3. 执行系统定时任务：每天检查一次全量任务状态，清理已完成超过 30 天的任务及其临时工作空间；
  * 4. 任务完成/失败后向 Coordinator 反馈（通过团队回调）。
  */
-import { parseCron, nextRun, matches } from "../core/cron.js";
+import { parseCron, nextRun, matches, isOneShot } from "../core/cron.js";
 import { log } from "../core/logger.js";
 import type { AppConfig } from "../config.js";
 import type { ScheduleStore } from "../core/schedule-store.js";
@@ -68,11 +68,18 @@ export class SchedulerAgent {
     log.info("scheduler", `触发定时任务 ${schedule.id}「${schedule.name}」`);
     const res = await this.deps.runScheduled(schedule);
     const next = nextRun(schedule.cron, new Date(Date.now() + 1000));
+    // 一次性任务（dom 与 mon 均受限，如 `28 1 14 8 *`）：触发后自动停用，不再安排下次触发，
+    // 避免被当作每天/每年重复触发（issue #2）。
+    const oneShot = isOneShot(schedule.cron);
     this.store.update(schedule.id, {
       lastRunAt: Date.now(),
-      nextRunAt: next?.getTime(),
+      nextRunAt: oneShot ? undefined : next?.getTime(),
+      enabled: oneShot ? false : schedule.enabled,
       taskIds: res.taskId ? [...schedule.taskIds, res.taskId] : schedule.taskIds,
     });
+    if (oneShot) {
+      log.info("scheduler", `一次性定时任务 ${schedule.id}「${schedule.name}」已触发完成，自动停用（避免重复触发）`);
+    }
     if (res.error) {
       log.error("scheduler", `定时任务 ${schedule.id} 执行失败: ${res.error}`);
     }
