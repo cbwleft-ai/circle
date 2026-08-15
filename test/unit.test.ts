@@ -107,6 +107,110 @@ export async function runUnitTests(): Promise<TestResult[]> {
     }),
   );
 
+  // ---------- issue #2：一次性任务 day-of-month / day-of-week 约束回归 ----------
+  results.push(
+    await runCase("U-18", "cron", "issue#2 一次性任务：日/月字段约束生效（只触发一次）", async (t) => {
+      // cron "28 1 14 8 *"：期望只在 8月14日 01:28 UTC 触发（8月14日当天一次），而非每天重复
+      const ONE_SHOT = "28 1 14 8 *";
+      const from = new Date("2025-08-13T00:00:00Z");
+      const next = nextRun(ONE_SHOT, from);
+      t.assert(next !== undefined, "应能计算下次触发");
+      t.assert(
+        next!.toISOString() === "2025-08-14T01:28:00.000Z",
+        `期望 2025-08-14T01:28:00Z（8月14日当天一次），实际 ${next!.toISOString()}`,
+      );
+      // 8月其他日期（非14日）不应命中——旧实现忽略「日」字段，会在任意日期命中
+      const notHit = nextRun(ONE_SHOT, new Date("2025-08-13T01:28:00Z"));
+      t.assert(
+        notHit!.toISOString() === "2025-08-14T01:28:00.000Z",
+        `8月13日不应触发，下次仍应为 8月14日，实际 ${notHit!.toISOString()}`,
+      );
+      t.log(`nextRun("${ONE_SHOT}", 8/13 00:00) → ${next!.toISOString()}（仅 8月14日当天，不再每天重复）`);
+    }),
+  );
+
+  results.push(
+    await runCase("U-19", "cron", "issue#2 一次性任务触发后不再次日重复（fire 后重算）", async (t) => {
+      const ONE_SHOT = "28 1 14 8 *";
+      // 模拟在 8月14日 01:28 触发后，Scheduler 立即重算下一次触发（from = now + 1s）
+      const afterFire = nextRun(ONE_SHOT, new Date("2025-08-14T01:28:30Z"));
+      t.assert(afterFire !== undefined, "应能重算下次触发");
+      t.assert(
+        afterFire!.toISOString() === "2026-08-14T01:28:00.000Z",
+        `触发后下次触发应为次年 8月14日（而非次日 8月15日），实际 ${afterFire!.toISOString()}`,
+      );
+      // 次日同一时刻不应再命中（旧实现：下次触发变为次日相同时间 → 每日重复）
+      const nextDay = nextRun(ONE_SHOT, new Date("2025-08-15T01:28:00Z"));
+      t.assert(
+        nextDay!.toISOString() === "2026-08-14T01:28:00.000Z",
+        `8月15日同一时刻不应触发，实际 ${nextDay!.toISOString()}`,
+      );
+      // 8月剩余日期（16 日起）也应跳过，直到次年 8月14日
+      const later = nextRun(ONE_SHOT, new Date("2025-08-16T00:00:00Z"));
+      t.assert(
+        later!.toISOString() === "2026-08-14T01:28:00.000Z",
+        `8月16日起应跳过当年剩余日期，实际 ${later!.toISOString()}`,
+      );
+      t.log("触发后重算 → 次年 8月14日；次日/当月其余日期均不再触发（不再每日重复）");
+    }),
+  );
+
+  results.push(
+    await runCase("U-20", "cron", "nextRun 严格返回 from 之后（同一分钟不重复触发）", async (t) => {
+      // 若触发时刻恰为匹配分钟（如 10:00:00 触发后立即重算），下一次必须严格晚于该分钟
+      const atExact = nextRun("0 10 * * *", new Date("2025-01-01T10:00:00Z"));
+      t.assert(
+        atExact!.toISOString() === "2025-01-02T10:00:00.000Z",
+        `不应返回同一分钟 10:00，实际 ${atExact!.toISOString()}`,
+      );
+      // 触发前一刻（09:59:30）则返回当天 10:00
+      const before = nextRun("0 10 * * *", new Date("2025-01-01T09:59:30Z"));
+      t.assert(
+        before!.toISOString() === "2025-01-01T10:00:00.000Z",
+        `09:59:30 起算应得当天 10:00，实际 ${before!.toISOString()}`,
+      );
+      t.log("同一分钟内不再重复触发：10:00:00 起算 → 次日 10:00；09:59:30 起算 → 当天 10:00");
+    }),
+  );
+
+  results.push(
+    await runCase("U-21", "cron", "dom/dow Vixie 语义：周字段与日字段分别生效", async (t) => {
+      // 仅指定星期（dow 受限、dom 为 *）：每周一 10:00（2025-01-06 为周一）
+      const weekly = nextRun("0 10 * * 1", new Date("2025-01-01T00:00:00Z"));
+      t.assert(
+        weekly!.toISOString() === "2025-01-06T10:00:00.000Z",
+        `每周一应命中 2025-01-06，实际 ${weekly!.toISOString()}`,
+      );
+      // dom 与 dow 均受限：任一匹配即触发（Vixie OR）——周一或 8月14日
+      // 2025-08-11 为周一（非14日），应命中
+      const monday = nextRun("0 10 14 8 1", new Date("2025-08-10T00:00:00Z"));
+      t.assert(
+        monday!.toISOString() === "2025-08-11T10:00:00.000Z",
+        `周一（非14日）应命中，实际 ${monday!.toISOString()}`,
+      );
+      // 2025-08-14 为周四（14日），应命中
+      const dom = nextRun("0 10 14 8 1", new Date("2025-08-12T00:00:00Z"));
+      t.assert(
+        dom!.toISOString() === "2025-08-14T10:00:00.000Z",
+        `8月14日（周四）应命中，实际 ${dom!.toISOString()}`,
+      );
+      t.log("dow 受限仅按周匹配；dom+dow 均受限时任一命中（Vixie OR）");
+    }),
+  );
+
+  results.push(
+    await runCase("U-22", "cron", "matches 与 nextRun 日字段语义一致（一次性任务到期判断）", async (t) => {
+      t.assert(matches("28 1 14 8 *", new Date("2025-08-14T01:28:00Z")), "8月14日 01:28 应匹配");
+      t.assert(!matches("28 1 14 8 *", new Date("2025-08-15T01:28:00Z")), "8月15日 01:28 不应匹配（日字段约束生效）");
+      t.assert(!matches("28 1 14 8 *", new Date("2025-08-14T01:29:00Z")), "分钟不匹配不应命中");
+      // Vixie OR：周一或 8月14日 命中；其他日期不命中
+      t.assert(matches("0 10 14 8 1", new Date("2025-08-11T10:00:00Z")), "周一（非14日）应匹配");
+      t.assert(matches("0 10 14 8 1", new Date("2025-08-14T10:00:00Z")), "8月14日应匹配");
+      t.assert(!matches("0 10 14 8 1", new Date("2025-08-13T10:00:00Z")), "周三（非14日非周一）不应匹配");
+      t.log("matches 已与 nextRun 保持一致的 dom/dow 语义");
+    }),
+  );
+
   // ---------- 任务存储 ----------
   const storeDir = mkdtempSync(join(tmpdir(), "circle-unit-store-"));
   try {
@@ -239,6 +343,68 @@ export async function runUnitTests(): Promise<TestResult[]> {
         await sched.fire(s);
         t.assert(fired === 1, "触发回调应被调用");
         t.assert(store.get(s.id)!.lastRunAt !== undefined, "应记录 lastRunAt");
+        sched.stop();
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }),
+  );
+
+  results.push(
+    await runCase("U-23", "Scheduler", "issue#2 一次性定时任务只触发一次（不再每天重复）", async (t) => {
+      const dir = mkdtempSync(join(tmpdir(), "circle-unit-oneshot-"));
+      try {
+        const { SchedulerAgent } = await import("../src/agents/scheduler.js");
+        const store = new ScheduleStore(dir);
+        const fired: number[] = [];
+        const sched = new SchedulerAgent(
+          store,
+          { schedulerTickMs: 1000, cleanupAfterDays: 30, cleanupCron: "0 3 * * *" } as never,
+          {
+            runScheduled: async () => {
+              fired.push(Date.now());
+              return { taskId: `T-${fired.length}` };
+            },
+            runDailyCleanup: async () => ({ removedTasks: 0, removedScratch: 0 }),
+          },
+        );
+        // 一次性任务：cron "28 1 14 8 *"（8月14日 01:28 UTC）
+        const s = sched.create({
+          name: "一次性提醒",
+          cron: "28 1 14 8 *",
+          description: "d",
+          workerName: "dev",
+        });
+        t.assert(s.nextRunAt !== undefined, "创建后应计算下次触发");
+        const firstIso = new Date(s.nextRunAt!).toISOString();
+        t.assert(
+          /08-14T01:28/.test(firstIso),
+          `下次触发应为 8月14日 01:28，实际 ${firstIso}`,
+        );
+
+        // 模拟到达触发时刻：手动触发一次
+        await sched.fire(s);
+        t.assert(fired.length === 1, "一次性任务应只触发 1 次");
+
+        const after = store.get(s.id)!;
+        t.assert(after.nextRunAt !== undefined, "触发后应重算下次触发");
+        const nextIso = new Date(after.nextRunAt!).toISOString();
+        t.assert(
+          /08-14T01:28/.test(nextIso),
+          `触发后下次触发仍应为 8月14日 01:28（而非次日 8月15日），实际 ${nextIso}`,
+        );
+        // 旧 bug：下次触发变为「次日相同时间」（约 1 天）。修复后为同年剩余（<1天）或次年（>300 天），
+        // 绝不应是 1~2 天的每日重复。
+        const gapDays = (after.nextRunAt! - after.lastRunAt!) / 86_400_000;
+        t.assert(
+          gapDays > 300 || gapDays < 1,
+          `下次触发不应为次日重复（1~2 天），实际间隔 ${gapDays.toFixed(2)} 天`,
+        );
+
+        // 模拟后续 tick：由于 nextRunAt 未到期，不应再次触发
+        const beforeTick = fired.length;
+        await sched.tick();
+        t.assert(fired.length === beforeTick, "后续 tick 不应再次触发一次性任务");
         sched.stop();
       } finally {
         rmSync(dir, { recursive: true, force: true });
