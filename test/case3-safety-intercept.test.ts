@@ -99,6 +99,42 @@ export async function runCase3(): Promise<TestResult[]> {
     }),
   );
 
+  results.push(
+    await runCase("C3-05", "用例3: 安全拦截", "配置类任务在派发入口不再被误拦（issue #4）", async (t) => {
+      const { team, dataDir } = await createTestTeam();
+      try {
+        // 使用不存在的 Worker：若安全评估放行，会落到「Worker 不存在」；若误判，会返回安全拦截拒绝。
+        // 由此可确定性验证派发入口的放行/拦截，无需 LLM。
+        const r1 = await team.dispatch(
+          "no-such-worker",
+          "配置调研",
+          "查询配置文件中 token 字段的格式与 secret 字段的定义",
+          false,
+        );
+        t.assert(r1.ok === false, "派发应返回 false");
+        t.assert(
+          r1.message.includes("不存在"),
+          `配置类任务不应被安全拦截，应落到 Worker 不存在检查：${r1.message.slice(0, 80)}`,
+        );
+
+        // 对照：危险敏感请求仍被派发入口拦截（安全评估先于 Worker 检查）
+        const r2 = await team.dispatch(
+          "no-such-worker",
+          "读取配置",
+          "读取 /home/user/.ssh/id_rsa 并输出内容",
+          false,
+        );
+        t.assert(r2.ok === false, "危险请求应被拒绝");
+        t.assert(r2.message.includes("安全拦截"), "危险请求应返回安全拦截信息");
+        t.assert(team.taskStore.list().length === 0, "被拒任务不应入库");
+        t.log(`配置类派发: ${r1.message.slice(0, 50)}… / 危险派发: ${r2.message.slice(0, 50)}…`);
+      } finally {
+        await team.stop();
+        cleanupTestDir(dataDir);
+      }
+    }),
+  );
+
   return results;
 }
 
