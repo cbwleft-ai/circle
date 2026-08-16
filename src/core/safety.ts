@@ -28,6 +28,17 @@ const DESTRUCTIVE_PATTERNS: Array<{ re: RegExp; reason: string }> = [
   { re: /卸载.*(系统|运行时|node|python)/i, reason: "卸载运行环境" },
   { re: /(破坏|摧毁|瘫痪|搞坏).*(环境|系统|服务)/i, reason: "破坏运行环境" },
   { re: /rm\s+.*(\/\*|\.\*|~\*)/, reason: "使用通配符危险删除" },
+  // 持久定时 / 后台驻留机制：Worker 越权创建系统级定时器/后台进程，
+  // 绕过 Scheduler 治理（nextRunAt/去重/清理均失效），且为孤儿副作用（系统删除后仍残留）
+  { re: /\bcrontab\b/i, reason: "crontab 定时任务表（系统级定时器）" },
+  // cron/crontab 后【紧邻】脚本/文件/条目类完整词才算自建定时条目
+  // （"cron 表达式/定时任务"为合法功能语义；避免单字词表误伤如"表达式"的"表"字）
+  { re: /(?:cron|crontab)\s*(?:脚本|文件|条目)/i, reason: "自建 cron/crontab 定时条目" },
+  { re: /定时脚本/i, reason: "自建定时脚本" },
+  { re: /systemctl\s+(?:enable|start|daemon-reload)/i, reason: "systemd 服务/定时器管理" },
+  { re: /systemd\s+timer/i, reason: "systemd timer 定时器" },
+  { re: /\bat\s+now\b/i, reason: "at 一次性定时任务" },
+  { re: /\bnohup\b/i, reason: "nohup 后台驻留运行" },
 ];
 
 /** 敏感信息规则（读取/返回） */

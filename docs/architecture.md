@@ -178,10 +178,78 @@ sequenceDiagram
 
 ### 3.3 定时任务
 
-```
-用户 ─► Coordinator ─► create_schedule ─► Scheduler（cron 校验 + 计算 nextRunAt）
-到达触发时间：Scheduler.fire ─► 创建 Task ─► Worker 执行 ─► 完成
-      └─ reportCompletion（带 scheduleId）→ Coordinator → 用户
+流程概述：用户通过 Coordinator 创建定时任务（cron 合法性校验 + 计算 `nextRunAt`）；
+Scheduler **确定性 tick 轮询**（默认 30s）扫描到期任务，创建 Task 派发给 Worker，
+完成后经 `reportCompletion`（带 scheduleId）由 Coordinator 向用户汇报。
+触发全程不依赖 LLM，保证可靠。
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as 用户
+    participant IM as IM 适配器
+    participant T as AgentTeam
+    participant C as Coordinator<br/>(LLM 会话 · 无执行工具)
+    participant S as Scheduler<br/>(确定性 · tick 30s)
+    participant SS as ScheduleStore
+    participant TS as TaskStore
+    participant W as Worker<br/>(LLM 会话 · 任务工作空间)
+
+    rect rgb(235, 245, 255)
+    Note over U,W: —— ① 创建定时任务 ——
+    U->>IM: 「创建定时任务：每天上午 10 点检查任务状态」
+    IM->>T: handleUserMessage(消息)
+    T->>C: coordinator.respond(用户消息)
+    C->>C: LLM 换算自然语言时间 → 调用 create_schedule<br/>(name, cron="0 10 * * *", desc, worker)
+    C->>T: 工具回调 createSchedule
+    T->>T: 校验 Worker 存在
+    T->>S: scheduler.create（parseCron 合法性校验）
+    S->>SS: create → enabled=true, taskIds=[]
+    S->>SS: nextRun(cron) 计算 nextRunAt（本地时区）
+    SS-->>S: 已持久化（schedules.json）
+    S-->>T: 返回 ScheduledTask
+    T-->>C: 工具返回「创建成功 + id + cron + nextRunAt」
+    C-->>T: 整理确认文案
+    T-->>IM: outbox(确认)
+    IM-->>U: 「定时任务 S-… 已创建，下次触发：明天 10:00」
+    end
+
+    rect rgb(245, 240, 255)
+    Note over S,W: —— ② 到期触发执行（确定性，不依赖 LLM）——
+    Note over S: tick 每 30s 轮询<br/>到期判定：nextRunAt ≤ now 且 > lastRunAt（双层防重）
+    S->>T: 回调 runScheduled(schedule)
+    T->>TS: 创建 Task（received, priority=long,<br/>requestedBy=scheduler, scheduleId）
+    T->>SS: addTaskRecord(scheduleId, taskId)
+    T->>TS: markRunning → status=running
+    T->>W: executeTask → worker.runTask(task, workspace)
+    W->>W: 独立会话执行（任务工作空间，30 分钟超时保护）
+    W-->>T: 返回执行结果
+    T->>TS: markCompleted（完整结果入库）<br/>归档产出物 outputs/<taskId>/
+    T-->>S: 返回 {taskId, result}
+    S->>SS: 更新 lastRunAt / nextRunAt（exclusive 防重）
+    end
+
+    alt 执行成功
+        T->>C: reportCompletion 注入系统通知（带 scheduleId）
+        C->>C: LLM 整理最终汇报
+        C-->>T: 汇报文案
+        T-->>IM: outbox(汇报)
+        IM-->>U: 「定时任务 S-… 触发：任务 T-… 已完成：…」
+    else 执行失败
+        W-->>T: 抛出异常
+        T->>TS: markFailed（错误入库）
+        T->>C: reportCompletion 注入失败通知（带 scheduleId）
+        C-->>T: 失败汇报文案
+        T-->>IM: outbox(失败汇报)
+        IM-->>U: 「定时任务 S-… 触发的任务失败：…」
+    end
+
+    opt 每日清理（系统定时任务 cron "0 3 * * *"）
+        Note over S: matches(cleanupCron, now) 且距上次检查 >60s
+        S->>TS: cleanupCompleted：删除完成超 30 天的任务记录
+        S->>T: 删除对应任务工作空间 tasks/<taskId>
+        Note over S: 产出物目录 outputs/ 持久保留
+    end
 ```
 
 **触发防重（双重）**：`nextRun` 支持 `exclusive` 语义（严格晚于触发时刻的下一整分钟起算），
@@ -242,4 +310,8 @@ ScheduledTask: id / name / cron(5段) / description / workerName / enabled
 3. **任务工作空间隔离**：每个任务拥有独立会话工作空间（`tasks/<taskId>/`，会话 cwd），
    任务之间互不可见；产出物归档到 `outputs/<taskId>/`，按任务隔离存放，互不覆盖；
 4. **敏感信息不落地**：拦截发生在派发之前，Worker 永远不会收到敏感类指令；
-5. **超时与清理**：任务超时中止会话；任务工作空间 30 天自动清理（产出物目录保留）防止存储膨胀。
+5. **禁止持久定时/后台驻留**：`crontab`/`systemctl`/`at now`/`nohup`/`定时脚本`/`cron 脚本`等
+   自建系统级定时器与后台驻留模式被确定性规则拦截；Worker 提示词同步硬约束：执行一次性、
+   禁止创建 crontab/at/systemd/后台进程，周期性需求上报 Coordinator 使用定时任务功能——
+   防止绕过 Scheduler 治理的孤儿定时器（nextRunAt/去重/清理对其均失效）；
+6. **超时与清理**：任务超时中止会话；任务工作空间 30 天自动清理（产出物目录保留）防止存储膨胀。
