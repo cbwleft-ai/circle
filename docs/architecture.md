@@ -310,4 +310,8 @@ ScheduledTask: id / name / cron(5段) / description / workerName / enabled
 3. **任务工作空间隔离**：每个任务拥有独立会话工作空间（`tasks/<taskId>/`，会话 cwd），
    任务之间互不可见；产出物归档到 `outputs/<taskId>/`，按任务隔离存放，互不覆盖；
 4. **敏感信息不落地**：拦截发生在派发之前，Worker 永远不会收到敏感类指令；
-5. **超时与清理**：任务超时中止会话；任务工作空间 30 天自动清理（产出物目录保留）防止存储膨胀。
+5. **禁止持久定时/后台驻留**：`crontab`/`systemctl`/`at now`/`nohup`/`定时脚本`/`cron 脚本`等
+   自建系统级定时器与后台驻留模式被确定性规则拦截；Worker 提示词同步硬约束：执行一次性、
+   禁止创建 crontab/at/systemd/后台进程，周期性需求上报 Coordinator 使用定时任务功能——
+   防止绕过 Scheduler 治理的孤儿定时器（nextRunAt/去重/清理对其均失效）；
+6. **超时与清理**：任务超时中止会话；任务工作空间 30 天自动清理（产出物目录保留）防止存储膨胀。

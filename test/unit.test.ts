@@ -61,6 +61,41 @@ export async function runUnitTests(): Promise<TestResult[]> {
     }),
   );
 
+  results.push(
+    await runCase("U-06b", "安全评估", "持久定时/后台驻留机制被识别（Worker 越权自建定时器）", async (t) => {
+      const samples: Array<[string, string]> = [
+        ["创建 crontab 每 5 分钟报时", "crontab"],
+        ["执行 crontab -e 添加定时任务", "crontab"],
+        ["写个定时脚本每天凌晨清理日志", "定时脚本"],
+        ["创建 cron 脚本每分钟运行", "cron 脚本"],
+        ["用 systemctl enable 启动定时服务", "systemd"],
+        ["nohup 后台运行脚本", "nohup"],
+        ["用 at now 安排一次性任务", "at now"],
+      ];
+      for (const [sample, hint] of samples) {
+        const v = assessSafety(sample);
+        t.assert(v.risk === "destructive", `应拦截「${sample}」（期望 destructive，实际 ${v.risk}）`);
+        t.log(`「${sample}」→ ${v.reasons[0] ?? hint}`);
+      }
+    }),
+  );
+
+  results.push(
+    await runCase("U-06c", "安全评估", "合法的定时任务创建请求不被误拦截", async (t) => {
+      const okSamples = [
+        "创建一个定时任务：每天上午 10 点检查任务状态，cron 0 10 * * *",
+        "创建一个 cron 任务，每分钟执行一次并汇报",
+        "帮我设置每周一早上 9 点提醒我喝水",
+        "这个任务每分钟执行一次，用定时任务功能安排",
+        "写一个 hello world 脚本并运行，保存输出到 out.txt",
+      ];
+      for (const sample of okSamples) {
+        const v = assessSafety(sample);
+        t.assert(v.risk === "none", `不应拦截合法请求「${sample}」（实际 ${v.risk}）`);
+      }
+    }),
+  );
+
   // ---------- cron ----------
   results.push(
     await runCase("U-07", "cron", "标准 5 段表达式解析", async (t) => {
