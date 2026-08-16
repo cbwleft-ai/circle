@@ -16,6 +16,7 @@
     "test:case1": "tsx test/case1-long-task.test.ts",
     "test:case2": "tsx test/case2-scheduled-task.test.ts",
     "test:case3": "tsx test/case3-safety-intercept.test.ts",
+    "test:case4": "tsx test/case4-restart-reconcile.test.ts",
     "report": "tsx test/run.ts --report-only"
   },
   "dependencies": {

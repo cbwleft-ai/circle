@@ -165,6 +165,46 @@ export async function runUnitTests(): Promise<TestResult[]> {
         t.assert(store.get(fresh.id) !== undefined, "新任务记录应保留");
       }),
     );
+
+    results.push(
+      await runCase("U-13b", "任务存储", "启动对账：进程重启遗留的进行中任务标记为失败", async (t) => {
+        const store = new TaskStore(storeDir);
+        const running = store.create({
+          title: "重启前执行中",
+          description: "x",
+          status: "running",
+          priority: "long",
+          workerName: "dev",
+          requestedBy: "user",
+        });
+        const received = store.create({
+          title: "重启前未开始",
+          description: "x",
+          status: "received",
+          priority: "long",
+          workerName: "dev",
+          requestedBy: "user",
+        });
+        const done = store.create({
+          title: "重启前已完成",
+          description: "x",
+          status: "completed",
+          priority: "short",
+          workerName: "dev",
+          requestedBy: "user",
+          completedAt: Date.now(),
+        });
+        const interrupted = store.reconcileInterrupted("进程重启，任务中断");
+        t.assert(interrupted.length === 2, `应标记 2 个任务，实际 ${interrupted.length}`);
+        t.assert(store.get(running.id)!.status === "failed", "running 任务应标记为 failed");
+        t.assert(store.get(received.id)!.status === "failed", "received 任务应标记为 failed");
+        t.assert(store.get(running.id)!.error?.includes("重启"), "应记录中断原因");
+        t.assert(store.get(done.id)!.status === "completed", "已完成任务不受影响");
+        t.assert(store.pending().length === 0, "对账后不应再有待办任务");
+        // 幂等：再次对账无副作用
+        t.assert(store.reconcileInterrupted("再次重启").length === 0, "再次对账不应重复标记");
+      }),
+    );
   } finally {
     rmSync(storeDir, { recursive: true, force: true });
   }
