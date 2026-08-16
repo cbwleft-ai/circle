@@ -171,6 +171,10 @@ sequenceDiagram
 > `AgentTeam` 的同步方法调用（非 LLM 回合），此处为便于阅读合并展示；
 > 定时任务（见 3.3）触发后同样复用「创建 Task → executeTask → reportCompletion」链路，
 > 区别仅在于任务来源为 Scheduler 且汇报文案带 scheduleId。
+>
+> **汇报截断策略**：注入 Coordinator 的执行结果采用「头尾兼顾」摘要（`summarizeText`）——
+> 长文本保留头 1500 + 尾 1500 字符、中间以省略标记连接（关键结论在尾部，保证必达），
+> 完整结果始终存于 TaskStore 与产出物目录；系统兜底直发（Coordinator 不可用）截断为 500 字符。
 
 ### 3.3 定时任务
 
