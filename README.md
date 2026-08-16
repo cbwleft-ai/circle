@@ -1,5 +1,9 @@
 # Circle — 单 Agent 多任务协作系统
 
+<p align="center">
+  <img src="assets/logo/circle-logo.svg" alt="Circle Logo" width="200"/>
+</p>
+
 > 由**单个 Agent 主动管理多任务**，使用者在微信中只面对一个「Coordinator」，
 > 系统内部通过 **Coordinator / Worker / Scheduler** 组成的 Agent Team 完成
 > 任务沟通、执行与周期调度的分工协作，无需在多个 Agent 之间切换上下文。
@@ -75,6 +79,7 @@ CIRCLE_LLM_TESTS=0 npm test   # 仅运行确定性用例（无需 API key）
 | 使用文档 | [docs/usage.md](docs/usage.md) |
 | 架构设计 | [docs/architecture.md](docs/architecture.md) |
 | 二次开发说明 | [docs/development.md](docs/development.md) |
+| 品牌 Logo | [assets/logo/](assets/logo/)（`circle-logo.svg` 主 Logo、`circle-logo-icon.png` 项目图标、`circle-logo-social-preview.png` 社交预览图） |
 
 ## 目录结构
 
