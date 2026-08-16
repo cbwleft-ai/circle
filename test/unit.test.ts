@@ -114,6 +114,33 @@ export async function runUnitTests(): Promise<TestResult[]> {
     }),
   );
 
+  results.push(
+    await runCase("U-11b", "cron", "nextRun exclusive：严格晚于 from，防止同一分钟重复触发", async (t) => {
+      // 每分钟任务：普通模式包含 from 所在分钟（落回过去），exclusive 从下一分钟起
+      const from = new Date(2025, 0, 1, 15, 30, 20);
+      const plain = nextRun("* * * * *", from);
+      const excl = nextRun("* * * * *", from, { exclusive: true });
+      t.assert(plain!.getTime() === new Date(2025, 0, 1, 15, 30, 0).getTime(), "普通模式含 from 所在分钟");
+      t.assert(
+        excl!.getTime() === new Date(2025, 0, 1, 15, 31, 0).getTime(),
+        `exclusive 应从下一整分钟起算，实际 ${excl}`,
+      );
+      t.assert(excl!.getTime() > from.getTime(), "exclusive 结果必须严格晚于 from");
+      // 每天 10 点：from 恰在触发时刻附近时，exclusive 应跳过当天 10:00，取次日
+      const atNine = new Date(2025, 0, 1, 9, 0, 5);
+      t.assert(nextRun("0 10 * * *", atNine, { exclusive: true })!.getDate() === 1, "09:00 起算应命中当天 10:00");
+      const atTen = new Date(2025, 0, 1, 10, 0, 5);
+      const next = nextRun("0 10 * * *", atTen, { exclusive: true })!;
+      t.assert(next.getDate() === 2, `10:00 起算应跳过当天，取次日（实际 ${next}）`);
+      // from 恰好整分钟：exclusive 仍取下一分钟
+      const exactly = new Date(2025, 0, 1, 15, 30, 0);
+      t.assert(
+        nextRun("* * * * *", exactly, { exclusive: true })!.getMinutes() === 31,
+        "from 为整分钟时 exclusive 仍应取下一分钟",
+      );
+    }),
+  );
+
   // ---------- 任务存储 ----------
   const storeDir = mkdtempSync(join(tmpdir(), "circle-unit-store-"));
   try {
@@ -368,6 +395,17 @@ export async function runUnitTests(): Promise<TestResult[]> {
         await sched.fire(s);
         t.assert(fired === 1, "触发回调应被调用");
         t.assert(store.get(s.id)!.lastRunAt !== undefined, "应记录 lastRunAt");
+        // fire 后 nextRunAt 应严格晚于 lastRunAt（exclusive 语义），同一分钟不再触发
+        const after = store.get(s.id)!;
+        t.assert(after.nextRunAt! > after.lastRunAt!, "fire 后 nextRunAt 应严格晚于 lastRunAt");
+        // tick 去重：nextRunAt 落回过去但 <= lastRunAt 时不应重复触发
+        store.update(s.id, { nextRunAt: Date.now() - 60_000, lastRunAt: Date.now() - 30_000 });
+        await sched.tick();
+        t.assert(fired === 1, "已触发过的到期点不应重复 fire（nextRunAt <= lastRunAt 应被去重）");
+        // 跨过 lastRunAt 的到期点应正常触发
+        store.update(s.id, { nextRunAt: Date.now() - 60_000, lastRunAt: Date.now() - 120_000 });
+        await sched.tick();
+        t.assert(fired === 2, "严格晚于 lastRunAt 的到期点应正常触发");
         sched.stop();
       } finally {
         rmSync(dir, { recursive: true, force: true });

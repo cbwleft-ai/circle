@@ -184,6 +184,10 @@ sequenceDiagram
       └─ reportCompletion（带 scheduleId）→ Coordinator → 用户
 ```
 
+**触发防重（双重）**：`nextRun` 支持 `exclusive` 语义（严格晚于触发时刻的下一整分钟起算），
+保证 `fire` 后 `nextRunAt` 一定指向未来；tick 判定额外要求 `nextRunAt > lastRunAt`，
+即使 `nextRunAt` 因异常落回过去也不会在同一触发点重复 fire。
+
 ### 3.4 安全拦截
 
 ```
