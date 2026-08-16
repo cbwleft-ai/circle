@@ -56,7 +56,8 @@ export class SchedulerAgent {
     const now = new Date();
     for (const s of this.store.list(true)) {
       const nextAt = s.nextRunAt;
-      if (nextAt !== undefined && nextAt <= now.getTime()) {
+      // 到期（nextRunAt <= now）且未被本次触发过（> lastRunAt）：双重防重
+      if (nextAt !== undefined && nextAt <= now.getTime() && nextAt > (s.lastRunAt ?? 0)) {
         await this.fire(s);
       }
     }
@@ -67,7 +68,8 @@ export class SchedulerAgent {
   async fire(schedule: ScheduledTask): Promise<void> {
     log.info("scheduler", `触发定时任务 ${schedule.id}「${schedule.name}」`);
     const res = await this.deps.runScheduled(schedule);
-    const next = nextRun(schedule.cron, new Date(Date.now() + 1000));
+    // exclusive：从下一整分钟起算，nextRunAt 严格晚于本次触发，防止同一分钟重复触发
+    const next = nextRun(schedule.cron, new Date(), { exclusive: true });
     this.store.update(schedule.id, {
       lastRunAt: Date.now(),
       nextRunAt: next?.getTime(),

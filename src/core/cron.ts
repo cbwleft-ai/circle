@@ -86,14 +86,24 @@ function daysInMonth(y: number, m: number): number {
 /**
  * 计算 cron 在 from（含）之后的下一次触发时间。
  * 注意：dom 与 dow 的关系采用「两者任一匹配即触发」（与 Vixie cron 一致）。
+ *
+ * opts.exclusive=true 时从 from 的【下一个整分钟】开始扫描，保证返回
+ * 严格晚于 from 的匹配——用于 fire 后更新 nextRunAt，避免同一触发点重复触发
+ * （from 所在分钟若匹配会被普通模式包含，导致 nextRunAt 落回过去）。
  */
-export function nextRun(cron: ParsedCron | string, from: Date = new Date()): Date | undefined {
+export function nextRun(
+  cron: ParsedCron | string,
+  from: Date = new Date(),
+  opts: { exclusive?: boolean } = {},
+): Date | undefined {
   const parsed = typeof cron === "string" ? parseCron(cron) : cron;
   const [minField, hourField, domField, monField, dowField] = parsed.fields;
   const SCAN_LIMIT = 366 * 24 * 60; // 最多向前扫描 1 年
 
   const candidate = new Date(from);
   candidate.setSeconds(0, 0);
+  // exclusive：跳过 from 所在的整分钟（下一分钟起扫）
+  if (opts.exclusive) candidate.setMinutes(candidate.getMinutes() + 1);
 
   // 全部使用本地时间字段（getFullYear/getMonth/getDate/getDay/getHours/getMinutes），
   // 使 cron 的「分 时 日 月 周」按进程本地时区匹配，修复 UTC+8 晚 8 小时触发问题。
