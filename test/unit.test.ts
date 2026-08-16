@@ -10,6 +10,7 @@ import { assessSafety } from "../src/core/safety.js";
 import { TaskStore } from "../src/core/task-store.js";
 import { ScheduleStore } from "../src/core/schedule-store.js";
 import { WorkspaceManager } from "../src/core/workspace.js";
+import { summarizeText } from "../src/team/agent-team.js";
 import { runCase, type TestResult } from "./helpers.js";
 
 export async function runUnitTests(): Promise<TestResult[]> {
@@ -263,6 +264,29 @@ export async function runUnitTests(): Promise<TestResult[]> {
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }
+    }),
+  );
+
+  // ---------- 汇报摘要 ----------
+  results.push(
+    await runCase("U-14c", "汇报摘要", "长文本头尾兼顾，短文本原样返回", async (t) => {
+      // 短文本：原样返回
+      const short = "短结果：已完成，产出 data.csv";
+      t.assert(summarizeText(short) === short, "短文本应原样返回");
+      // 长文本：头尾保留 + 省略标记
+      const head = "H".repeat(2000);
+      const mid = "M".repeat(5000);
+      const tail = "T-结论".repeat(1000); // 4000 字符（关键结论应在尾部）
+      const long = head + mid + tail; // 11000 字符
+      const s = summarizeText(long);
+      t.assert(s.length < long.length, "长文本应被压缩");
+      t.assert(s.startsWith("H".repeat(1500)), "应保留头部（过程开头）");
+      t.assert(s.endsWith("T-结论".repeat(375)), "应保留尾部（关键结论）");
+      t.assert(s.includes("中间省略 8000 字符"), "省略字符数应正确");
+      t.assert(s.includes("完整结果已存储"), "应说明完整结果已存储");
+      // 自定义阈值（失败兜底路径）
+      const s2 = summarizeText(long, { maxChars: 500, headChars: 200, tailChars: 200 });
+      t.assert(s2.includes("中间省略 10600 字符"), "自定义阈值下省略数应正确");
     }),
   );
 
