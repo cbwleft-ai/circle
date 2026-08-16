@@ -62,7 +62,7 @@ export class AgentTeam implements TeamGateway {
     this.modelRuntime = opts.modelRuntime;
     this.taskStore = new TaskStore(this.config.dataDir);
     this.scheduleStore = new ScheduleStore(this.config.dataDir);
-    this.workspace = new WorkspaceManager(`${this.config.dataDir}/workspaces`);
+    this.workspace = new WorkspaceManager(`${this.config.dataDir}/workspaces`, this.config.agentDir);
 
     for (const w of opts.workers) {
       const dir = this.workspace.workerDir(w.name);
@@ -193,11 +193,11 @@ export class AgentTeam implements TeamGateway {
     });
     log.info("team", `创建任务 ${task.id}「${title}」→ ${workerName}（${task.priority}）`);
 
-    const scratch = this.workspace.taskScratchDir(workerName, task.id);
+    const workspace = this.workspace.taskWorkspaceDir(workerName, task.id);
 
     if (long) {
       // 长程任务：立即 ack，异步执行
-      void this.executeTask(task, worker, scratch, true);
+      void this.executeTask(task, worker, workspace, true);
       return {
         ok: true,
         task,
@@ -208,7 +208,7 @@ export class AgentTeam implements TeamGateway {
 
     // 短程任务：同步执行（结果直接在工具返回值中带出，由 Coordinator 在当轮汇报，不再触发独立通知）
     try {
-      const result = await this.executeTask(task, worker, scratch, false);
+      const result = await this.executeTask(task, worker, workspace, false);
       return {
         ok: true,
         task,
@@ -228,27 +228,36 @@ export class AgentTeam implements TeamGateway {
   }
 
   /**
-   * 执行任务（更新状态 + 完成后通知 Coordinator 汇报）。
+   * 执行任务（更新状态 + 完成后归档产出物 + 通知 Coordinator 汇报）。
    * notify=true 适用于长程/定时任务（在非 Coordinator 回合中异步执行）；
    * notify=false 适用于短程任务（结果随工具返回值返回，避免递归触发 Coordinator 回合）。
    */
   private async executeTask(
     task: Task,
     worker: WorkerAgent,
-    scratch: string,
+    workspace: string,
     notify: boolean,
   ): Promise<string> {
     this.taskStore.markRunning(task.id);
     try {
-      const result = await worker.runTask(task, scratch);
+      const result = await worker.runTask(task, workspace);
       this.taskStore.markCompleted(task.id, result);
       log.info("team", `任务 ${task.id} 已完成`);
-      if (notify) await this.reportCompletion(task, result, false);
-      return result;
+      // 归档任务工作空间为产出物目录（tasks/<taskId> → outputs/<taskId>），持久保留
+      let report = result;
+      try {
+        const outDir = this.workspace.archiveTaskOutput(task.workerName, task.id);
+        report = `${result}\n\n产出物目录：${outDir}`;
+      } catch (e) {
+        log.warn("team", `任务 ${task.id} 产出物归档失败: ${(e as Error).message}`);
+      }
+      if (notify) await this.reportCompletion(task, report, false);
+      return report;
     } catch (e) {
       const err = (e as Error).message;
       this.taskStore.markFailed(task.id, err);
       log.error("team", `任务 ${task.id} 失败: ${err}`);
+      // 失败任务的工作空间保留在 tasks/<taskId> 便于排查，由 30 天清理兜底
       if (notify) await this.reportCompletion(task, err, true);
       throw e;
     }
@@ -316,25 +325,25 @@ export class AgentTeam implements TeamGateway {
       requestChatId: this.currentChatId,
     });
     this.scheduleStore.addTaskRecord(schedule.id, task.id);
-    const scratch = this.workspace.taskScratchDir(schedule.workerName, task.id);
+    const workspace = this.workspace.taskWorkspaceDir(schedule.workerName, task.id);
     try {
-      const result = await this.executeTask(task, worker, scratch, true);
+      const result = await this.executeTask(task, worker, workspace, true);
       return { taskId: task.id, result };
     } catch (e) {
       return { taskId: task.id, error: (e as Error).message };
     }
   }
 
-  /** 每日清理：删除已完成超过 N 天的任务记录及其临时工作空间 */
-  private async runDailyCleanup(): Promise<{ removedTasks: number; removedScratch: number }> {
+  /** 每日清理：删除已完成超过 N 天的任务记录及其任务工作空间 */
+  private async runDailyCleanup(): Promise<{ removedTasks: number; removedWorkspaces: number }> {
     const removedTasks = this.taskStore.cleanupCompleted(this.config.cleanupAfterDays);
     for (const t of removedTasks) {
-      this.workspace.removeTaskScratch(t.workerName, t.id);
+      this.workspace.removeTaskWorkspace(t.workerName, t.id);
     }
-    const removedScratch = this.workspace.cleanupStaleScratch(
+    const removedWorkspaces = this.workspace.cleanupStaleTaskWorkspaces(
       this.config.cleanupAfterDays * 24 * 3600 * 1000,
     );
-    return { removedTasks: removedTasks.length, removedScratch };
+    return { removedTasks: removedTasks.length, removedWorkspaces };
   }
 
   /** 供测试/运维手动触发定时任务 */

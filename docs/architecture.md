@@ -28,6 +28,8 @@ Circle 采用「单一入口 + 角色分离」的协作架构。使用者只感�
                                └──────────────────────────────┘
 ```
 
+> 各消息流的**时序图**见第 3 节：长程任务完整时序（含后台执行/成功/失败/轮次检查）见 [3.2](#32-长程任务)。
+
 ## 2. 角色实现
 
 ### 2.1 Coordinator（`src/agents/coordinator.ts`）
@@ -56,11 +58,16 @@ Circle 采用「单一入口 + 角色分离」的协作架构。使用者只感�
 
 ### 2.2 Worker（`src/agents/worker.ts`）
 
-- 每个 Worker 一个注册项（名称/职责描述/工作目录/技能），拥有**独立持久工作环境**：
-  - 工作目录：`data/workspaces/<workerName>/`，产出物直接输出到此（便于取用）；
-  - 技能：工作目录下 `.pi/skills/` 的 SKILL.md 自动发现加载，也可在配置中指定文件；
-  - 临时工作空间：`data/workspaces/<workerName>/.scratch/<taskId>/`（任务级隔离）；
-- 每个任务使用**独立 LLM 会话**（上下文干净），但共享该 Worker 的工作环境；
+- 每个 Worker 一个注册项（名称/职责描述/技能），拥有独立持久目录：
+  - 持久目录：`data/workspaces/<workerName>/`，存放技能（`.pi/skills/` 自动发现）与配置；
+  - **每个任务拥有独立会话 + 独立工作空间**：会话 `cwd` 指向
+    `data/workspaces/<workerName>/tasks/<taskId>/`，任务之间互不可见、互不影响；
+  - 任务工作空间内建两个技能**软链接**，技能文件在任务工作空间内即可访问
+    （更新实时同步、零拷贝）：`.pi/skills` → Worker 技能目录（项目级）、
+    `.pi/agent-skills` → 用户级技能目录（`~/.pi/agent/skills`）；
+  - 完成后工作空间归档为产出物目录 `outputs/<taskId>/`（持久保留，便于取用，
+    归档时移除技能软链接保持产出纯净），任务工作空间随任务记录 30 天清理；
+- 每个任务使用**独立 LLM 会话**（上下文干净）；
 - 短程任务：执行后直接返回结果；长程任务：团队先下发 ack，执行完成后再反馈；
 - 单任务超时保护（默认 30 分钟，可配置）。
 
@@ -73,8 +80,8 @@ Circle 采用「单一入口 + 角色分离」的协作架构。使用者只感�
   2. 到期触发：创建 Task → 派发给指定 Worker → 跟进 → 完成后由
      Coordinator 向用户汇报（通知中带 scheduleId）；
   3. **系统定时任务**：每日 cron（默认 `0 3 * * *`）执行全量任务状态检查，
-     清理**已完成超过 30 天**的任务记录及其临时工作空间（`.scratch/<taskId>/`），
-     持久产出物保留。
+     清理**已完成超过 30 天**的任务记录及其任务工作空间（`tasks/<taskId>/`），
+     产出物目录（`outputs/<taskId>/`）持久保留。
 
 ## 3. 消息流
 
@@ -92,12 +99,78 @@ Circle 采用「单一入口 + 角色分离」的协作架构。使用者只感�
 
 ### 3.2 长程任务
 
+流程概述：`dispatch_task(long=true)` 后工具**立即返回**「任务已收到 + 任务编号」，
+任务转入后台异步执行；完成/失败时团队注入系统通知，Coordinator 整理后主动向用户汇报。
+用户等待期间可继续对话，系统每 N 轮（默认 5 轮）自动检查一次待办任务进展。
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as 用户
+    participant IM as IM 适配器
+    participant T as AgentTeam
+    participant C as Coordinator<br/>(LLM 会话 · 无执行工具)
+    participant S as TaskStore
+    participant W as Worker<br/>(LLM 会话 · 独立工作目录)
+    participant WS as Workspace
+
+    U->>IM: 发起长程任务请求（下载/爬取/批量/编译/渲染等）
+    IM->>T: handleUserMessage(消息)
+    T->>T: ① 入口安全评估<br/>（破坏性/敏感 → 直接拒绝，不进入 LLM）
+    T->>C: coordinator.respond(用户消息)
+    C->>C: LLM 判断为长程任务<br/>→ 调用 dispatch_task(long=true)
+    C->>T: 工具回调 dispatch(worker, title, desc, long)
+    T->>T: ② 派发入口二次安全复核<br/>（LLM 误判也无法绕过）
+    T->>S: create() → status=received, priority=long
+    T->>WS: 创建任务专属工作空间 tasks/<taskId>/（会话 cwd）
+    Note over T,W: 长程任务：立即 ack，后台异步执行，不等待结果
+    T-->>C: 工具返回「任务已收到 + 任务编号」
+    C-->>T: 整理 ack 文案
+    T-->>IM: outbox(ack)
+    IM-->>U: 「任务已收到，编号 T-…，完成后我会主动汇报」
+
+    rect rgb(235, 245, 255)
+        Note over T,W: —— 后台执行（用户可继续对话）——
+        T->>S: markRunning() → status=running
+        T->>W: executeTask → worker.runTask(task, workspace)
+        W->>W: 创建独立 AgentSession（cwd=任务工作空间，上下文干净）
+        W->>WS: 读/写任务工作空间 tasks/<taskId>/（与其它任务完全隔离）
+        W->>W: 执行指令（默认 30 分钟超时保护）
+    end
+
+    alt 执行成功
+        W-->>T: 返回执行结果
+        T->>S: markCompleted() → status=completed
+        T->>WS: 归档产出物：tasks/<taskId> → outputs/<taskId>（持久保留）
+        T->>C: 注入系统通知（任务已完成 + 结果 + 产出物目录）
+        C->>C: LLM 整理最终汇报
+        C-->>T: 汇报文案
+        T-->>IM: outbox(汇报)
+        IM-->>U: 「任务 T-… 已完成：<结果摘要>」
+    else 执行失败
+        W-->>T: 抛出异常
+        T->>S: markFailed() → status=failed
+        T->>C: 注入系统通知（任务失败 + 原因）
+        C-->>T: 失败汇报文案
+        T-->>IM: outbox(失败汇报)
+        IM-->>U: 「任务 T-… 执行失败：<原因>」
+    end
+
+    opt 每 N 轮对话状态检查（默认 5 轮）
+        Note over T: turnCount % 5 == 0 且存在待办任务（received/running）
+        T->>C: 注入系统提醒「请检查待办任务状态」
+        C->>T: 调用 list_tasks 查询
+        T-->>C: 任务状态摘要
+        C-->>T: 整理进展汇报
+        T-->>IM: outbox(进展)
+        IM-->>U: 「任务 T-… 正在执行中…」
+    end
 ```
-用户 ─► Coordinator ─► dispatch_task(long=true)
-      ├─ 工具立即返回「任务已收到 + 编号」→ Coordinator 回复用户（ack）
-      └─ 后台：Worker 执行 → TaskStore 标记 completed
-           └─ reportCompletion：注入系统通知 → Coordinator 整理 → 回复用户
-```
+
+> 说明：`C->>T` 的 `list_tasks` 查询与 `T-->>C` 的状态摘要在实现中均为
+> `AgentTeam` 的同步方法调用（非 LLM 回合），此处为便于阅读合并展示；
+> 定时任务（见 3.3）触发后同样复用「创建 Task → executeTask → reportCompletion」链路，
+> 区别仅在于任务来源为 Scheduler 且汇报文案带 scheduleId。
 
 ### 3.3 定时任务
 
@@ -124,7 +197,7 @@ Circle 采用「单一入口 + 角色分离」的协作架构。使用者只感�
 | cron | `src/core/cron.ts` | 5 段 cron 解析、nextRun、matches |
 | 任务存储 | `src/core/task-store.ts` | JSON 持久化、状态机、30 天清理 |
 | 定时任务存储 | `src/core/schedule-store.ts` | JSON 持久化、触发历史 |
-| 工作空间 | `src/core/workspace.ts` | Worker 目录/任务临时空间/过期清理 |
+| 工作空间 | `src/core/workspace.ts` | Worker 目录/任务工作空间（`tasks/<id>`）/产出物归档（`outputs/<id>`）/过期清理 |
 | IM 适配器 | `src/im/*` | 统一接口，console/http/weixin(官方)/wechat(wechaty) 四实现 |
 | 团队 | `src/team/agent-team.ts` | 组合三角色、消息路由、轮次状态检查、结果汇报 |
 
@@ -143,6 +216,7 @@ ScheduledTask: id / name / cron(5段) / description / workerName / enabled
 
 1. **Coordinator 无执行工具**：`noTools: "builtin"`，物理上无法执行命令或改文件；
 2. **双重安全评估**：`handleUserMessage` 入口（确定性）+ `dispatch` 派发入口（复核）；
-3. **Worker 隔离**：每个 Worker 独立 cwd，任务级 scratch 隔离；产出物互不可见；
+3. **任务工作空间隔离**：每个任务拥有独立会话工作空间（`tasks/<taskId>/`，会话 cwd），
+   任务之间互不可见；产出物归档到 `outputs/<taskId>/`，按任务隔离存放，互不覆盖；
 4. **敏感信息不落地**：拦截发生在派发之前，Worker 永远不会收到敏感类指令；
-5. **超时与清理**：任务超时中止会话；30 天自动清理防止存储与临时文件膨胀。
+5. **超时与清理**：任务超时中止会话；任务工作空间 30 天自动清理（产出物目录保留）防止存储膨胀。

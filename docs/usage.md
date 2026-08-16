@@ -221,7 +221,11 @@ data/
 ├── schedules.json        # 定时任务记录
 └── workspaces/
     └── <workerName>/
-        ├── .pi/skills/   # 该 Worker 的技能
-        ├── .scratch/     # 任务临时工作空间（随任务清理）
-        └── ...           # 任务产出物（持久保留，便于取用）
+        ├── .pi/skills/   # 该 Worker 的技能（自动发现）
+        ├── tasks/        # 任务工作空间（每任务独立，随任务清理）
+        │   └── <taskId>/ #   会话 cwd，任务间完全隔离
+        │       ├── .pi/skills       → 软链接到上方技能目录（Worker 技能）
+        │       └── .pi/agent-skills → 软链接到 ~/.pi/agent/skills（用户级技能）
+        └── outputs/      # 产出物归档（按任务隔离，持久保留，不含技能链接）
+            └── <taskId>/
 ```
