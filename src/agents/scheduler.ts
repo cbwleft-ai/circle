@@ -17,7 +17,7 @@ export interface SchedulerDeps {
   /** 触发定时任务：创建 Task 并派发给 Worker，返回任务 */
   runScheduled(schedule: ScheduledTask): Promise<{ taskId: string; result?: string; error?: string }>;
   /** 每日清理回调 */
-  runDailyCleanup(): Promise<{ removedTasks: number; removedScratch: number }>;
+  runDailyCleanup(): Promise<{ removedTasks: number; removedWorkspaces: number }>;
 }
 
 export class SchedulerAgent {
@@ -127,7 +127,7 @@ export class SchedulerAgent {
         const res = await this.deps.runDailyCleanup();
         log.info(
           "scheduler",
-          `每日清理完成：删除任务记录 ${res.removedTasks} 条，清理临时工作空间 ${res.removedScratch} 个`,
+          `每日清理完成：删除任务记录 ${res.removedTasks} 条，清理任务工作空间 ${res.removedWorkspaces} 个`,
         );
       }
     } catch (e) {

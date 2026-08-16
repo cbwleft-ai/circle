@@ -61,7 +61,8 @@ defineTool({
 - **新增技能**：将 SKILL.md 放入 Worker 工作目录 `.pi/skills/`（自动发现），
   或在 Worker 配置 `skills` 字段指定文件路径（`src/agents/worker.ts` 的 `loadSkills`）；
 - **调整工具集**：Worker 配置 `tools` 字段（默认 `read, bash, edit, write, grep, find, ls`）；
-- **任务上下文**：每个任务独立 LLM 会话，系统提示词由 `buildSystemPrompt(task, scratchDir)` 生成。
+- **任务上下文**：每个任务独立 LLM 会话，系统提示词由 `buildSystemPrompt(task, workspaceDir)` 生成；
+  会话 `cwd` 指向任务专属工作空间 `tasks/<taskId>/`（`src/core/workspace.ts` 的 `taskWorkspaceDir`）。
 
 ### 2.3 新增 IM 通道
 
@@ -90,7 +91,7 @@ export interface ImAdapter {
 - tick 间隔：`CIRCLE_SCHEDULER_TICK_MS`；
 - 清理周期与保留天数：`CIRCLE_CLEANUP_CRON` / `CIRCLE_CLEANUP_AFTER_DAYS`；
 - 触发逻辑：`src/agents/scheduler.ts` 的 `tick()` / `fire()`；
-- 清理逻辑：`AgentTeam.runDailyCleanup()`（任务记录 + scratch 工作空间）。
+- 清理逻辑：`AgentTeam.runDailyCleanup()`（任务记录 + 任务工作空间，产出物目录保留）。
 
 ### 2.6 更换/新增模型
 

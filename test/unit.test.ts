@@ -2,7 +2,7 @@
  * 单元测试：安全评估 / cron / 任务存储 / 定时任务存储 / 工作空间 / IM 适配器。
  * 全部确定性执行，不依赖 LLM。
  */
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseCron, nextRun, matches } from "../src/core/cron.js";
@@ -228,25 +228,54 @@ export async function runUnitTests(): Promise<TestResult[]> {
 
   // ---------- 工作空间 ----------
   results.push(
-    await runCase("U-15", "工作空间", "Worker 独立目录 + 技能目录 + 临时空间", async (t) => {
+    await runCase("U-15", "工作空间", "Worker 独立目录 + 任务级会话工作空间隔离 + 产出物归档", async (t) => {
       const dir = mkdtempSync(join(tmpdir(), "circle-unit-ws-"));
+      const agentDir = mkdtempSync(join(tmpdir(), "circle-unit-agent-"));
       try {
-        const ws = new WorkspaceManager(dir);
+        const ws = new WorkspaceManager(dir, agentDir);
         const w1 = ws.workerDir("worker-a");
         const w2 = ws.workerDir("worker-b");
         t.assert(w1 !== w2, "不同 Worker 目录应独立");
         writeFileSync(join(w1, "output.txt"), "a 的产出");
-        const scratch = ws.taskScratchDir("worker-a", "T-1");
-        writeFileSync(join(scratch, "tmp.bin"), "x");
-        t.assert(ws.taskScratchDir("worker-b", "T-1") !== scratch, "任务临时空间按 Worker 隔离");
-        // 产出物互不影响
-        const { existsSync } = await import("node:fs");
+        // 用户级技能目录（~/.pi/agent/skills 的替身）
+        const agentSkills = join(agentDir, "skills");
+        mkdirSync(agentSkills, { recursive: true });
+        writeFileSync(join(agentSkills, "user-skill.md"), "user skill probe");
+        // 任务工作空间：按 Worker 与按任务双重隔离
+        const wsA1 = ws.taskWorkspaceDir("worker-a", "T-1");
+        const wsA2 = ws.taskWorkspaceDir("worker-a", "T-2");
+        const wsB1 = ws.taskWorkspaceDir("worker-b", "T-1");
+        writeFileSync(join(wsA1, "out.txt"), "T-1 的产出");
+        t.assert(wsA1 !== wsA2, "同一 Worker 的不同任务工作空间应隔离");
+        t.assert(wsA1 !== wsB1, "不同 Worker 的同名任务工作空间应隔离");
+        t.assert(!existsSync(join(wsA2, "out.txt")), "任务 T-2 不应看到任务 T-1 的产出");
         t.assert(!existsSync(join(w2, "output.txt")), "worker-b 不应看到 worker-a 的产出物");
-        ws.removeTaskScratch("worker-a", "T-1");
-        t.assert(!existsSync(join(scratch, "tmp.bin")), "临时空间应被删除");
-        t.assert(existsSync(join(w1, "output.txt")), "持久产出物应保留");
+        // 技能软链接：任务工作空间内 .pi/skills 指向 Worker 技能目录
+        const skillsLink = join(wsA1, ".pi", "skills");
+        t.assert(lstatSync(skillsLink).isSymbolicLink(), "任务工作空间内应有技能软链接");
+        const skillsReal = join(w1, ".pi", "skills");
+        t.assert(readlinkSync(skillsLink) === skillsReal, "技能软链接应指向 Worker 技能目录");
+        // 用户级技能软链接：.pi/agent-skills 指向 agentDir/skills
+        const agentSkillsLink = join(wsA1, ".pi", "agent-skills");
+        t.assert(lstatSync(agentSkillsLink).isSymbolicLink(), "任务工作空间内应有用户级技能软链接");
+        t.assert(readlinkSync(agentSkillsLink) === agentSkills, "用户级技能软链接应指向 agentDir/skills");
+        // 技能文件通过软链接可见（写入技能目录后任务工作空间内应能看到）
+        writeFileSync(join(skillsReal, "probe-skill.md"), "probe");
+        t.assert(existsSync(join(skillsLink, "probe-skill.md")), "技能文件应通过软链接可见");
+        t.assert(existsSync(join(agentSkillsLink, "user-skill.md")), "用户级技能文件应通过软链接可见");
+        // 完成后归档产出物：tasks/<id> → outputs/<id>
+        const archived = ws.archiveTaskOutput("worker-a", "T-1");
+        t.assert(archived.endsWith(join("outputs", "T-1")), "产出物应归档到 outputs/<taskId>");
+        t.assert(existsSync(join(archived, "out.txt")), "归档后产出文件应存在");
+        t.assert(!existsSync(wsA1), "归档后原任务工作空间应被移除");
+        t.assert(!existsSync(join(archived, ".pi")), "产出物目录不应包含技能软链接");
+        // 删除任务工作空间
+        ws.removeTaskWorkspace("worker-a", "T-2");
+        t.assert(!existsSync(wsA2), "任务工作空间应被删除");
+        t.assert(existsSync(join(archived, "out.txt")), "产出物目录（持久）应保留");
       } finally {
         rmSync(dir, { recursive: true, force: true });
+        rmSync(agentDir, { recursive: true, force: true });
       }
     }),
   );
@@ -267,7 +296,7 @@ export async function runUnitTests(): Promise<TestResult[]> {
               fired++;
               return { taskId: "T-1" };
             },
-            runDailyCleanup: async () => ({ removedTasks: 0, removedScratch: 0 }),
+            runDailyCleanup: async () => ({ removedTasks: 0, removedWorkspaces: 0 }),
           },
         );
         const s = sched.create({ name: "测试", cron: "0 10 * * *", description: "d", workerName: "dev" });
