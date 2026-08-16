@@ -104,6 +104,24 @@ export class TaskStore {
   }
 
   /**
+   * 启动对账：把进程重启遗留的进行中任务（received/dispatched/running）标记为失败，
+   * 防止僵尸任务被 5 轮检查永久误报、且永远不被清理。
+   * 返回被标记的任务列表（供调用方通知用户；仅通知，不自动重跑）。
+   */
+  reconcileInterrupted(error: string): Task[] {
+    const interrupted = this.tasks.filter((t) =>
+      ["received", "dispatched", "running"].includes(t.status),
+    );
+    for (const t of interrupted) {
+      this.update(t.id, { status: "failed", error, completedAt: Date.now() });
+    }
+    if (interrupted.length > 0) {
+      log.info("task-store", `启动对账：${interrupted.length} 个遗留任务标记为失败（${error}）`);
+    }
+    return interrupted;
+  }
+
+  /**
    * 清理已完成超过 retentionDays 天的任务记录。
    * 返回被清理的任务列表（调用方负责清理其临时工作空间）。
    */

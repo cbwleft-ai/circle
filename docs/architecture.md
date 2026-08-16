@@ -188,6 +188,21 @@ sequenceDiagram
       └─（若 LLM 误判仍尝试派发）→ dispatch 入口二次安全复核 → 拒绝
 ```
 
+### 3.5 进程重启（启动对账）
+
+```
+进程重启 → AgentTeam.start()
+      ├─ TaskStore.reconcileInterrupted：received/dispatched/running 任务
+      │    全部标记 failed（原因：进程重启，任务中断）——僵尸不再被 5 轮检查误报、
+      │    不再永久滞留（30 天清理只清 completed/failed，标记后进入清理范围）
+      └─ 按 requestChatId 分组 → 注入 Coordinator → 向用户发送中断通知
+           └─ 仅通知，不自动重跑：重跑由用户决定后重新派发（任务非幂等，避免副作用）
+```
+
+> 说明：Coordinator/Worker 会话均为内存会话（`SessionManager.inMemory`），重启后对话上下文
+> 丢失；任务/定时任务/产出物均为持久化存储，不受影响。重启时运行中的任务无法断点续跑，
+> 只能重跑——因此采用「状态自动对账 + 执行人工确认」策略。
+
 ## 4. 关键模块
 
 | 模块 | 文件 | 说明 |

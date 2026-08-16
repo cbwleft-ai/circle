@@ -84,10 +84,50 @@ export class AgentTeam implements TeamGateway {
   async start(): Promise<void> {
     await this.coordinator.start();
     this.scheduler.start();
+    // 启动对账：上次进程中断遗留的任务标记失败，并通知用户（仅通知，不自动重跑）
+    await this.reconcileInterrupted();
     log.info(
       "team",
       `AgentTeam 已启动：Coordinator + ${this.workers.size} 个 Worker + Scheduler`,
     );
+  }
+
+  /**
+   * 启动对账：把进程重启遗留的 received/running 任务标记为 failed，
+   * 并按发起会话（requestChatId）分组通知用户中断清单。
+   * 只通知、不自动恢复——重跑由用户决定后重新派发。
+   */
+  private async reconcileInterrupted(): Promise<void> {
+    const interrupted = this.taskStore.reconcileInterrupted("进程重启，任务中断");
+    if (interrupted.length === 0) return;
+
+    // 按 requestChatId 分组，避免打扰无关会话
+    const byChat = new Map<string, Task[]>();
+    for (const t of interrupted) {
+      const chatId = t.requestChatId ?? this.currentChatId;
+      const list = byChat.get(chatId) ?? [];
+      list.push(t);
+      byChat.set(chatId, list);
+    }
+
+    for (const [chatId, tasks] of byChat) {
+      const summary = tasks
+        .map((t) => `- ${t.id}「${t.title}」（Worker: ${t.workerName}）`)
+        .join("\n");
+      const notification = `（系统通知）系统已重启。上次进程中断时有 ${tasks.length} 个任务未完成，已标记为失败：\n${summary}\n\n请告知用户：这些任务如需重新执行，用户可以提出，我会重新派发。`;
+      try {
+        const reply = await this.enqueueCoordinator(() =>
+          this.coordinator.respond(notification),
+        );
+        if (reply) await this.outbox(chatId, reply);
+      } catch (e) {
+        log.error("team", `重启中断通知汇报失败: ${(e as Error).message}`);
+        await this.outbox(
+          chatId,
+          `（系统自动通知）系统已重启，以下 ${tasks.length} 个任务因进程中断未完成：\n${summary}\n\n如需重新执行，请告诉我。`,
+        );
+      }
+    }
   }
 
   async stop(): Promise<void> {

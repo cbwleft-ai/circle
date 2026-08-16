@@ -13,6 +13,7 @@ import { runUnitTests } from "./unit.test.js";
 import { runCase1 } from "./case1-long-task.test.js";
 import { runCase2 } from "./case2-scheduled-task.test.js";
 import { runCase3 } from "./case3-safety-intercept.test.js";
+import { runCase4 } from "./case4-restart-reconcile.test.js";
 import { runWeixinIlinkTests } from "./weixin-ilink.test.js";
 import { renderReport, type TestResult } from "./helpers.js";
 
@@ -40,6 +41,7 @@ async function main() {
   all.push(...(await runCase1()));
   all.push(...(await runCase2()));
   all.push(...(await runCase3()));
+  all.push(...(await runCase4()));
 
   const passed = all.filter((r) => r.passed).length;
   const failed = all.filter((r) => !r.passed && !r.skipped).length;
