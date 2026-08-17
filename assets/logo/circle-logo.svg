@@ -1,81 +1,30 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-labelledby="title desc">
   <title id="title">Circle Logo</title>
-  <desc id="desc">Circle 智能调度系统 Logo：中央圆环代表调度中枢，6 个环绕节点代表协同 Worker，橙色弧形箭头象征循环调度。</desc>
+  <desc id="desc">Circle 智能调度系统简洁版 Logo：深海军蓝圆角底，蓝至青渐变断环 + 亮色节点圆点，配 CIRCLE 字标。</desc>
   <defs>
-    <linearGradient id="hubGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#2563EB"/>
-      <stop offset="100%" stop-color="#06B6D4"/>
-    </linearGradient>
-    <linearGradient id="coreGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#1D4ED8"/>
-      <stop offset="100%" stop-color="#0EA5E9"/>
-    </linearGradient>
-    <linearGradient id="nodeGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#93C5FD"/>
+    <linearGradient id="ringGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#3B82F6"/>
       <stop offset="100%" stop-color="#22D3EE"/>
     </linearGradient>
-    <linearGradient id="accentGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#F97316"/>
-      <stop offset="100%" stop-color="#FBBF24"/>
-    </linearGradient>
-    <radialGradient id="glow" cx="50%" cy="50%" r="50%">
-      <stop offset="0%" stop-color="#38BDF8" stop-opacity="0.16"/>
-      <stop offset="60%" stop-color="#38BDF8" stop-opacity="0.05"/>
-      <stop offset="100%" stop-color="#38BDF8" stop-opacity="0"/>
-    </radialGradient>
   </defs>
 
-  <!-- 柔和光晕（增加科技感与层次） -->
-  <circle cx="256" cy="256" r="238" fill="url(#glow)"/>
+  <!-- 深海军蓝圆角底（圆角半径 = 10%） -->
+  <rect x="0" y="0" width="512" height="512" rx="51.2" fill="#0B1220"/>
 
-  <!-- 外圈轨道（虚线，象征持续运转） -->
-  <circle cx="256" cy="256" r="158" fill="none" stroke="#60A5FA" stroke-opacity="0.35" stroke-width="3" stroke-dasharray="5 11" stroke-linecap="round"/>
+  <!-- 主渐变断环：蓝→青，300° 可见弧（缺口位于 270°..330°，右上） -->
+  <path d="M 350.000 158.208 A 108.544 108.544 0 1 1 256 103.936"
+        fill="none" stroke="url(#ringGrad)" stroke-width="23.552" stroke-linecap="butt"/>
 
-  <!-- 节点与中枢的连接辐条（协作关系） -->
-  <g stroke="#93C5FD" stroke-opacity="0.5" stroke-width="3" stroke-linecap="round">
-    <line x1="366" y1="256" x2="414" y2="256"/>
-    <line x1="311" y1="160.74" x2="335" y2="119.17"/>
-    <line x1="201" y1="160.74" x2="177" y2="119.17"/>
-    <line x1="146" y1="256" x2="98" y2="256"/>
-    <line x1="201" y1="351.26" x2="177" y2="392.83"/>
-    <line x1="311" y1="351.26" x2="335" y2="392.83"/>
-  </g>
+  <!-- 内侧细环（增加层次，同缺口方向） -->
+  <path d="M 330.270 169.600 A 85.760 85.760 0 1 1 256 126.720"
+        fill="none" stroke="#385C9E" stroke-width="4.608" stroke-linecap="butt"/>
 
-  <!-- 循环调度箭头（橙色点睛，象征任务循环流转） -->
-  <path d="M 316 359.92 A 120 120 0 0 0 316 152.08" fill="none" stroke="#F97316" stroke-width="9" stroke-linecap="round"/>
-  <polygon points="316,152.08 337.57,154.72 329.07,169.44" fill="#F97316"/>
+  <!-- 缺口中心节点圆点 -->
+  <circle cx="310.272" cy="118.479" r="14.602" fill="#7DEBFC"/>
 
-  <!-- 中央调度中枢：主圆环 + 内核 -->
-  <circle cx="256" cy="256" r="95" fill="none" stroke="url(#hubGrad)" stroke-width="24"/>
-  <circle cx="256" cy="256" r="44" fill="url(#coreGrad)"/>
-  <circle cx="256" cy="256" r="31" fill="none" stroke="#FFFFFF" stroke-opacity="0.28" stroke-width="2.5"/>
-  <circle cx="244" cy="244" r="9" fill="#FFFFFF" fill-opacity="0.85"/>
-
-  <!-- 6 个 Worker 节点（围绕中枢协作；右上角为当前活跃 Worker，橙色高亮） -->
-  <g>
-    <circle cx="414" cy="256" r="26" fill="url(#nodeGrad)"/>
-    <circle cx="414" cy="256" r="13" fill="none" stroke="#FFFFFF" stroke-opacity="0.4" stroke-width="2.5"/>
-    <circle cx="414" cy="256" r="5" fill="#FFFFFF" fill-opacity="0.9"/>
-
-    <circle cx="335" cy="119.17" r="26" fill="url(#accentGrad)"/>
-    <circle cx="335" cy="119.17" r="13" fill="none" stroke="#FFFFFF" stroke-opacity="0.45" stroke-width="2.5"/>
-    <circle cx="335" cy="119.17" r="5" fill="#FFFFFF" fill-opacity="0.95"/>
-
-    <circle cx="177" cy="119.17" r="26" fill="url(#nodeGrad)"/>
-    <circle cx="177" cy="119.17" r="13" fill="none" stroke="#FFFFFF" stroke-opacity="0.4" stroke-width="2.5"/>
-    <circle cx="177" cy="119.17" r="5" fill="#FFFFFF" fill-opacity="0.9"/>
-
-    <circle cx="98" cy="256" r="26" fill="url(#nodeGrad)"/>
-    <circle cx="98" cy="256" r="13" fill="none" stroke="#FFFFFF" stroke-opacity="0.4" stroke-width="2.5"/>
-    <circle cx="98" cy="256" r="5" fill="#FFFFFF" fill-opacity="0.9"/>
-
-    <circle cx="177" cy="392.83" r="26" fill="url(#nodeGrad)"/>
-    <circle cx="177" cy="392.83" r="13" fill="none" stroke="#FFFFFF" stroke-opacity="0.4" stroke-width="2.5"/>
-    <circle cx="177" cy="392.83" r="5" fill="#FFFFFF" fill-opacity="0.9"/>
-
-    <circle cx="335" cy="392.83" r="26" fill="url(#nodeGrad)"/>
-    <circle cx="335" cy="392.83" r="13" fill="none" stroke="#FFFFFF" stroke-opacity="0.4" stroke-width="2.5"/>
-    <circle cx="335" cy="392.83" r="5" fill="#FFFFFF" fill-opacity="0.9"/>
-  </g>
+  <!-- CIRCLE 字标 -->
+  <text x="256" y="396.8" text-anchor="middle"
+        font-family="Ubuntu, 'DejaVu Sans', 'Liberation Sans', sans-serif"
+        font-size="65.536" font-weight="700" letter-spacing="19.456" fill="#D6E2F4">CIRCLE</text>
 </svg>
