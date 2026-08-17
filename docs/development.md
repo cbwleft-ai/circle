@@ -16,7 +16,8 @@ src/
 │   ├── safety.ts          # 安全评估（确定性规则）与拒绝文案
 │   ├── task-store.ts      # 任务存储（JSON 持久化 + 状态机 + 清理）
 │   ├── schedule-store.ts  # 定时任务存储
-│   └── workspace.ts       # Worker 工作空间与任务临时空间管理
+│   ├── text.ts            # 文本工具（summarizeText 头尾兼顾摘要 / formatBytes）
+│   └── workspace.ts       # Worker 工作空间与任务临时空间管理（含产出物只读访问）
 ├── agents/
 │   ├── coordinator.ts     # Coordinator LLM 会话 + 自定义工具 + 系统提示词
 │   ├── worker.ts          # Worker LLM 会话（按任务创建）+ 技能加载

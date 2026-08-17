@@ -22,4 +22,11 @@ export interface TeamGateway {
   listTasks(status?: string): string;
   /** 定时任务摘要 */
   listSchedules(): string;
+
+  /** 列出任务产出物清单（相对路径 + 大小），用于 Coordinator 直接核对 Worker 实际产物 */
+  listArtifacts(taskId: string): string;
+  /** 读取任务产出物目录内单个文件内容（只读、受限），用于 Coordinator 直接核对完整报告/数据 */
+  readArtifact(taskId: string, relPath: string): string;
+  /** 读取任务完整执行结果（未截断的原始结果），无结果时返回 undefined */
+  getTaskResult(taskId: string): string | undefined;
 }
