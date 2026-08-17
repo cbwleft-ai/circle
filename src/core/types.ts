@@ -83,8 +83,13 @@ export interface ChatMessage {
 
 /** 安全评估结论 */
 export interface SafetyVerdict {
-  /** none: 安全; sensitive: 涉及敏感信息; destructive: 破坏性操作 */
-  risk: "none" | "sensitive" | "destructive";
+  /**
+   * none: 安全;
+   * warning: 提及敏感字段但为「配置结构/格式/字段」调研上下文，放行但提示（禁止读取真实值）;
+   * sensitive: 涉及敏感信息（读取/返回真实私密值）;
+   * destructive: 破坏性操作。
+   */
+  risk: "none" | "warning" | "sensitive" | "destructive";
   /** 判定原因（供用户查看） */
   reasons: string[];
 }
