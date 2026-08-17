@@ -92,7 +92,8 @@ export class CoordinatorAgent {
    当用户需要完整信息、或需要核对 Worker 实际产出物时，直接调用下列工具读取，不必反复要求 Worker 转述：
    - task_result：读取任务完整执行结果（未截断）；
    - list_artifacts：查看产出物文件清单（路径 + 大小）；
-   - read_artifact：读取指定产出物文件内容（只读）。
+   - read_artifact：读取指定产出物文件内容（只读）；
+   - send_artifact：把指定产出物文件**直接发送给用户**（附件，如报告/图片/数据文件）。
 
 ## 可用 Worker
 ${workers || "- （暂无 Worker）"}
@@ -107,8 +108,9 @@ ${workers || "- （暂无 Worker）"}
 2. 拒绝敏感信息：读取/返回 API Key、密码、私钥、.env、SSH 凭据等**真实值** → 直接拒绝，绝不派发；
 3. 配置结构/格式/字段调研类任务（如"查询 token 字段的格式""梳理配置项说明"）属于合法任务，应正常派发；但只允许处理结构、格式、字段名与示例，禁止读取或返回任何真实私密值；
 4. 你不具备任何文件/命令执行能力，请勿假装执行；
-5. task_result / list_artifacts / read_artifact 仅用于读取**任务产出物**（只读、路径受限），
-   不授予任何写权限，也不能访问产出物目录以外的文件；产出物中不应包含真实密钥/密码等敏感值。
+5. task_result / list_artifacts / read_artifact / send_artifact 仅用于读取/发送**任务产出物**
+   （只读、路径受限），不授予任何写权限，也不能访问产出物目录以外的文件；
+   产出物中不应包含真实密钥/密码等敏感值。
 
 ## 沟通风格
 - 简洁、结构化，使用中文；
@@ -307,6 +309,24 @@ ${workers || "- （暂无 Worker）"}
         execute: async (_id, params) => {
           const text = g.readArtifact(params.taskId, params.path);
           return { content: [{ type: "text", text }], details: {} };
+        },
+      }),
+      defineTool({
+        name: "send_artifact",
+        label: "发送任务产出物给用户",
+        description:
+          "把指定任务的产出物文件（报告、图片、数据文件等）作为附件直接发送给用户。仅限任务产出物目录内文件（只读、路径受限、上限 20MB）；当前通道不支持文件发送时会自动降级为文字提示。用户要求拿到文件/图片、或产出物内容较长时优先使用。",
+        promptSnippet: "发送任务产出物文件给用户",
+        parameters: Type.Object({
+          taskId: Type.String({ description: "任务编号，如 T-20250813-0001" }),
+          path: Type.String({ description: "产出物目录内的相对文件路径（来自 list_artifacts）" }),
+          caption: Type.Optional(
+            Type.String({ description: "随文件附带的说明文字（可选，默认自动生成）" }),
+          ),
+        }),
+        execute: async (_id, params) => {
+          const res = await g.sendArtifact(params.taskId, params.path, params.caption);
+          return { content: [{ type: "text", text: res.message }], details: {} };
         },
       }),
     ];

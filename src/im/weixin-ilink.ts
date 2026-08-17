@@ -14,9 +14,10 @@
  *   也可用 CIRCLE_WEIXIN_BOT_TOKEN 直接指定已登录的 bot token 跳过扫码。
  */
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
+import { createCipheriv, randomBytes, createHash } from "node:crypto";
 import { join } from "node:path";
 import { log } from "../core/logger.js";
-import type { ChatMessage } from "../core/types.js";
+import type { ChatMessage, OutboundFile } from "../core/types.js";
 import type { ImAdapter } from "./adapter.js";
 
 // ============================================================================
@@ -24,6 +25,10 @@ import type { ImAdapter } from "./adapter.js";
 // ============================================================================
 
 export const WEIXIN_DEFAULT_BASE_URL = "https://ilinkai.weixin.qq.com";
+/** 微信 CDN（无 upload_full_url 时回退拼接上传地址） */
+export const WEIXIN_CDN_BASE_URL = "https://novac2c.cdn.weixin.qq.com/c2c";
+/** 文件消息发送大小上限（微信通道限制） */
+export const WEIXIN_MAX_FILE_BYTES = 20 * 1024 * 1024;
 const API_TIMEOUT_MS = 15000;
 const LONG_POLL_TIMEOUT_MS = 35000;
 const QR_POLL_INTERVAL_MS = 1000;
@@ -118,6 +123,8 @@ export interface WeixinIlinkOptions {
   botToken?: string;
   /** API base URL（默认官方） */
   baseUrl?: string;
+  /** CDN base URL（默认官方 CDN，服务端返回 upload_full_url 时优先使用） */
+  cdnBaseUrl?: string;
   /** bot 类型（默认 3） */
   botType?: string;
   /** 登录状态存储目录（默认 {dataDir}/weixin） */
@@ -363,6 +370,105 @@ export class WeixinIlinkAdapter implements ImAdapter {
       this.token,
     );
   }
+
+  /**
+   * 发送文件/图片消息（issue #24）。
+   * 流程（openclaw-weixin 同款官方协议）：
+   *   1. ilink/bot/getuploadurl 获取预签名上传地址 + 上传参数；
+   *   2. 文件内容 AES-128-ECB 加密后 POST 到 CDN（响应头 x-encrypted-param 为下载参数）；
+   *   3. ilink/bot/sendmessage 发送 type 4（文件）/ type 2（图片）消息。
+   */
+  async sendFile(chatId: string, file: OutboundFile): Promise<void> {
+    if (!this.token) throw new Error("微信未登录");
+    if (file.size > WEIXIN_MAX_FILE_BYTES) {
+      throw new Error(`文件过大（${file.size} 字节），微信通道上限 ${WEIXIN_MAX_FILE_BYTES} 字节`);
+    }
+    const toUserId = chatId.startsWith("wx:") ? chatId.slice(3) : chatId;
+    const isImage = (file.mimeType ?? "").startsWith("image/");
+
+    // 1) 上传准备：filekey / aeskey / md5 / 密文大小
+    const rawsize = file.size;
+    const rawfilemd5 = createHash("md5").update(file.content).digest("hex");
+    const aeskey = randomBytes(16);
+    const aeskeyHex = aeskey.toString("hex");
+    const filesize = aesEcbPaddedSize(rawsize);
+    const filekey = randomBytes(16).toString("hex");
+    const mediaType = isImage ? 1 : 3; // UploadMediaType: IMAGE=1, FILE=3
+
+    // 2) 获取上传 URL
+    const uploadUrlResp = await postJson(
+      this.apiBaseUrl,
+      "ilink/bot/getuploadurl",
+      {
+        filekey,
+        media_type: mediaType,
+        to_user_id: toUserId,
+        rawsize,
+        rawfilemd5,
+        filesize,
+        no_need_thumb: true,
+        aeskey: aeskeyHex,
+        base_info: { channel_version: "1.0.0" },
+      },
+      this.token,
+    );
+    const uploadFullUrl = uploadUrlResp?.upload_full_url?.trim();
+    const uploadParam = uploadUrlResp?.upload_param;
+    if (!uploadFullUrl && !uploadParam) {
+      throw new Error("微信 getuploadurl 未返回上传地址（upload_full_url/upload_param 均为空）");
+    }
+    const cdnBase = this.options.cdnBaseUrl ?? WEIXIN_CDN_BASE_URL;
+    const cdnUrl = uploadFullUrl
+      ? uploadFullUrl
+      : `${cdnBase.replace(/\/$/, "")}/upload?encrypted_query_param=${encodeURIComponent(uploadParam)}&filekey=${encodeURIComponent(filekey)}`;
+
+    // 3) AES-128-ECB 加密后上传 CDN
+    const cipher = createCipheriv("aes-128-ecb", aeskey, null);
+    const ciphertext = Buffer.concat([cipher.update(file.content), cipher.final()]);
+    const uploadRes = await fetch(cdnUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/octet-stream" },
+      body: new Uint8Array(ciphertext),
+    });
+    if (!uploadRes.ok) {
+      const errMsg = uploadRes.headers.get("x-error-message") ?? `HTTP ${uploadRes.status}`;
+      throw new Error(`CDN 上传失败: ${errMsg}`);
+    }
+    const downloadParam = uploadRes.headers.get("x-encrypted-param");
+    if (!downloadParam) {
+      throw new Error("CDN 上传响应缺少 x-encrypted-param 头");
+    }
+
+    // 4) 先发说明文字（独立文本消息），再发文件/图片消息
+    if (file.caption) {
+      await this.send(chatId, file.caption);
+    }
+    const media = {
+      encrypt_query_param: downloadParam,
+      aes_key: Buffer.from(aeskeyHex).toString("base64"),
+      encrypt_type: 1,
+    };
+    const item = isImage
+      ? { type: 2, image_item: { media, mid_size: filesize } }
+      : { type: 4, file_item: { media, file_name: file.fileName, len: String(rawsize) } };
+    await postJson(
+      this.apiBaseUrl,
+      "ilink/bot/sendmessage",
+      {
+        msg: {
+          from_user_id: "",
+          to_user_id: toUserId,
+          client_id: `circle-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+          message_type: 2,
+          message_state: 2,
+          item_list: [item],
+        },
+        base_info: { channel_version: "1.0.0" },
+      },
+      this.token,
+    );
+    log.info("im:weixin", `已发送文件消息 → ${toUserId}: ${file.fileName}（${rawsize} B, ${isImage ? "图片" : "文件"}）`);
+  }
 }
 
 // ============================================================================
@@ -406,4 +512,9 @@ function filterMarkdown(text: string): string {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+/** AES-128-ECB 加密后大小（PKCS7 对齐到 16 字节边界） */
+function aesEcbPaddedSize(plaintextSize: number): number {
+  return Math.ceil((plaintextSize + 1) / 16) * 16;
 }

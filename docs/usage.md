@@ -243,14 +243,22 @@ data/
 | `task_result` | 读取任务完整执行结果（未截断的原文） |
 | `list_artifacts` | 查看产出物文件清单（路径 + 大小） |
 | `read_artifact` | 读取指定产出物文件内容（只读） |
+| `send_artifact` | 把产出物文件**直接发送给用户**（附件，如报告/图片/数据文件） |
 
 示例对话：
 
 ```
 你：把上次 T-20250817-0001 任务的完整报告读给我，重点看结尾结论。
 Coordinator：（调用 task_result / list_artifacts / read_artifact 后汇报）
+
+你：把这份报告的 md 文件直接发给我。
+Coordinator：（调用 send_artifact 后）已发送：report.md ✓
 ```
 
 > 安全约束：以上工具**只读**且**路径受限**——只能访问任务产出物目录（`outputs/<taskId>/` 或
 > `tasks/<taskId>/`）内的文件；拒绝绝对路径与 `../` 目录穿越，不跟随符号链接，
 > 二进制文件拒绝返回，单文件最多返回约 20KB（超长保留头尾并标注）。
+> `send_artifact` 额外受 **20MB 大小上限**约束；当前 IM 通道不支持文件发送时
+> 自动降级为文字提示（附文件名/大小/产出物路径），不阻塞主流程。
+> 微信 iLink 通道支持文件（type 4）与图片（type 2）消息，走官方上传链路
+> （getuploadurl → AES-128-ECB 加密 → CDN → sendmessage）。

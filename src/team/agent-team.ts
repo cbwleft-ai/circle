@@ -22,11 +22,14 @@ import { formatBytes, summarizeText } from "../core/text.js";
 import type {
   ChatMessage,
   DispatchResult,
+  OutboundFile,
   ScheduledTask,
+  SendArtifactResult,
   Task,
   WorkerConfig,
 } from "../core/types.js";
 import { WorkspaceManager } from "../core/workspace.js";
+import { inferMimeType } from "../core/text.js";
 import type { TeamGateway } from "./gateway.js";
 
 export interface AgentTeamOptions {
@@ -34,6 +37,11 @@ export interface AgentTeamOptions {
   workers: WorkerConfig[];
   /** 下行消息出口（接入 IM 适配器） */
   outbox: (chatId: string, text: string) => Promise<void>;
+  /**
+   * 下行文件出口（附件，可选）。
+   * 未提供或抛出异常时，sendArtifact 自动降级为文本提示（不阻塞）。
+   */
+  sendFile?: (chatId: string, file: OutboundFile) => Promise<void>;
   modelRuntime?: ModelRuntime;
 }
 
@@ -78,9 +86,11 @@ export class AgentTeam implements TeamGateway {
       runDailyCleanup: () => this.runDailyCleanup(),
     });
     this.outbox = opts.outbox;
+    this.sendFile = opts.sendFile;
   }
 
   private outbox: (chatId: string, text: string) => Promise<void>;
+  private sendFile?: (chatId: string, file: OutboundFile) => Promise<void>;
 
   async start(): Promise<void> {
     await this.coordinator.start();
@@ -392,6 +402,49 @@ export class AgentTeam implements TeamGateway {
 
   getTaskResult(taskId: string): string | undefined {
     return this.taskStore.get(taskId)?.result;
+  }
+
+  async sendArtifact(taskId: string, relPath: string, caption?: string): Promise<SendArtifactResult> {
+    const task = this.taskStore.get(taskId);
+    if (!task) {
+      return { ok: false, message: `任务 ${taskId} 不存在，无法发送产出物。` };
+    }
+    const read = this.workspace.readTaskArtifactBuffer(task.workerName, taskId, relPath);
+    if (!read.ok || !read.buffer) {
+      return { ok: false, message: `无法发送产出物：${read.error}` };
+    }
+    const fileName = relPath.split("/").pop() ?? relPath;
+    const file: OutboundFile = {
+      fileName,
+      content: read.buffer,
+      size: read.size ?? read.buffer.length,
+      mimeType: inferMimeType(fileName),
+      caption: caption ?? `任务 ${taskId}「${task.title}」的产出物：${fileName}`,
+      sourcePath: this.workspace.taskArtifactRoot(task.workerName, taskId),
+    };
+    const chatId = task.requestChatId ?? this.currentChatId;
+    if (this.sendFile) {
+      try {
+        await this.sendFile(chatId, file);
+        log.info("team", `任务 ${taskId} 产出物已发送 → ${chatId}: ${fileName}（${file.size} B）`);
+        return {
+          ok: true,
+          message: `产出物 ${fileName} 已作为文件发送给用户（${file.size} 字节）。`,
+        };
+      } catch (e) {
+        const err = (e as Error).message;
+        log.warn("team", `任务 ${taskId} 产出物文件发送失败，降级为文本: ${err}`);
+        // 文件通道失败 → 降级为文本提示，不阻塞主流程
+      }
+    }
+    // 通道不支持文件或发送失败 → 文本降级
+    const fallback = `已生成产出物文件 ${fileName}（${file.size} 字节）${file.sourcePath ? `，完整文件位于 ${file.sourcePath}` : ""}。当前通道无法直接发送文件，如需内容可用 read_artifact 读取。`;
+    try {
+      await this.outbox(chatId, fallback);
+    } catch (e) {
+      return { ok: false, message: `产出物发送失败：${(e as Error).message}` };
+    }
+    return { ok: false, message: `产出物 ${fileName} 已生成但当前通道不支持文件发送，已通过文字告知用户（${file.size} 字节）。` };
   }
 
   /** Scheduler 触发：创建任务并派发 Worker，等待结果 */

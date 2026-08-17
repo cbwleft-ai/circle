@@ -81,6 +81,28 @@ export interface ChatMessage {
   text: string;
 }
 
+/** 下行文件消息载荷（附件） */
+export interface OutboundFile {
+  /** 文件名（含扩展名） */
+  fileName: string;
+  /** 文件内容（原始字节） */
+  content: Buffer;
+  /** MIME 类型（按扩展名推断，可选） */
+  mimeType?: string;
+  /** 文件字节数 */
+  size: number;
+  /** 随附文字说明（可选） */
+  caption?: string;
+  /** 来源产出物绝对路径（供不支持文件发送的通道降级提示） */
+  sourcePath?: string;
+}
+
+/** 产出物发送结果 */
+export interface SendArtifactResult {
+  ok: boolean;
+  message: string;
+}
+
 /** 安全评估结论 */
 export interface SafetyVerdict {
   /**

@@ -27,13 +27,15 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { resolve, sep, join } from "node:path";
-import { summarizeText } from "./text.js";
+import { summarizeText, formatBytes } from "./text.js";
 import { log } from "./logger.js";
 
 /** 单文件最多读取的字符数（超长时头尾保留，防止拖垮 Coordinator 上下文） */
 export const MAX_ARTIFACT_READ_CHARS = 20_000;
 /** 产出物清单最多返回条目数 */
 export const MAX_ARTIFACT_LIST_ENTRIES = 500;
+/** 产出物文件发送大小上限（字节，默认 20MB，微信通道限制） */
+export const MAX_ARTIFACT_SEND_BYTES = 20 * 1024 * 1024;
 
 /** 产出物清单条目 */
 export interface ArtifactEntry {
@@ -56,6 +58,17 @@ export interface ReadArtifactResult {
   /** 内容是否被截断（仅返回部分） */
   truncated?: boolean;
   /** 失败原因（路径越界 / 二进制 / 不存在等） */
+  error?: string;
+}
+
+/** 产出物文件原始字节读取结果（发送附件用） */
+export interface ReadArtifactBufferResult {
+  ok: boolean;
+  /** 文件原始内容（含二进制） */
+  buffer?: Buffer;
+  /** 文件字节数 */
+  size?: number;
+  /** 失败原因（路径越界 / 过大 / 不存在等） */
   error?: string;
 }
 
@@ -210,6 +223,44 @@ export class WorkspaceManager {
   }
 
   /**
+   * 解析任务产出物目录内文件的安全绝对路径（共用安全校验）。
+   * 返回 { abs } 或 { error }。校验项：产出物根目录存在、拒绝绝对路径/../目录穿越、
+   * 不跟随符号链接、拒绝目录。
+   */
+  private resolveArtifactFile(
+    workerName: string,
+    taskId: string,
+    relPath: string,
+  ): { abs?: string; error?: string } {
+    const root = this.taskArtifactRoot(workerName, taskId);
+    if (!root) {
+      return { error: `任务 ${taskId} 的产出物目录不存在` };
+    }
+    // 拒绝绝对路径与目录穿越（\ 在 Linux 下是合法文件名字符，但统一按非法路径拒绝）
+    if (!relPath || relPath.startsWith("/") || relPath.includes("\\") || relPath.includes("..")) {
+      return { error: "路径不合法：仅允许产出物目录内的相对路径" };
+    }
+    const abs = resolve(root, relPath);
+    const rootReal = resolve(root);
+    if (abs !== rootReal && !abs.startsWith(rootReal + sep)) {
+      return { error: "路径越界：仅允许产出物目录内的相对路径" };
+    }
+    let st;
+    try {
+      st = lstatSync(abs);
+    } catch {
+      return { error: `文件不存在: ${relPath}` };
+    }
+    if (st.isSymbolicLink()) {
+      return { error: `${relPath} 是符号链接，出于安全考虑不予读取` };
+    }
+    if (st.isDirectory()) {
+      return { error: `${relPath} 是目录，请先通过 list_artifacts 查看文件清单` };
+    }
+    return { abs };
+  }
+
+  /**
    * 读取任务产出物目录内单个文件内容（只读，Coordinator 侧核对用）。
    * 安全约束：
    * - 仅允许产出物根目录内的相对路径（拒绝绝对路径 / ../ 目录穿越，符号链接不跟随）；
@@ -217,29 +268,8 @@ export class WorkspaceManager {
    * - 二进制文件（含 NUL 字节）拒绝返回，避免污染 Coordinator 上下文。
    */
   readTaskArtifact(workerName: string, taskId: string, relPath: string): ReadArtifactResult {
-    const root = this.taskArtifactRoot(workerName, taskId);
-    if (!root) {
-      return { ok: false, error: `任务 ${taskId} 的产出物目录不存在` };
-    }
-    // 拒绝绝对路径与目录穿越（\ 在 Linux 下是合法文件名字符，但统一按非法路径拒绝）
-    if (!relPath || relPath.startsWith("/") || relPath.includes("\\") || relPath.includes("..")) {
-      return { ok: false, error: "路径不合法：仅允许产出物目录内的相对路径" };
-    }
-    const abs = resolve(root, relPath);
-    const rootReal = resolve(root);
-    if (abs !== rootReal && !abs.startsWith(rootReal + sep)) {
-      return { ok: false, error: "路径越界：仅允许产出物目录内的相对路径" };
-    }
-    let st;
-    try {
-      st = lstatSync(abs);
-    } catch {
-      return { ok: false, error: `文件不存在: ${relPath}` };
-    }
-    if (st.isSymbolicLink()) return { ok: false, error: `${relPath} 是符号链接，出于安全考虑不予读取` };
-    if (st.isDirectory()) {
-      return { ok: false, error: `${relPath} 是目录，请先通过 list_artifacts 查看文件清单` };
-    }
+    const { abs, error } = this.resolveArtifactFile(workerName, taskId, relPath);
+    if (error || !abs) return { ok: false, error };
     // 二进制检测：读取文件头 8KB 判断是否含 NUL 字节
     try {
       const fd = openSync(abs, "r");
@@ -247,7 +277,10 @@ export class WorkspaceManager {
         const probe = Buffer.alloc(8192);
         const n = readSync(fd, probe, 0, probe.length, 0);
         if (probe.subarray(0, n).includes(0)) {
-          return { ok: false, error: `${relPath} 是二进制文件，无法读取文本内容（大小 ${st.size} 字节）` };
+          return {
+            ok: false,
+            error: `${relPath} 是二进制文件，无法读取文本内容（大小 ${statSync(abs).size} 字节）`,
+          };
         }
       } finally {
         closeSync(fd);
@@ -264,7 +297,7 @@ export class WorkspaceManager {
     const truncated = content.length > MAX_ARTIFACT_READ_CHARS;
     return {
       ok: true,
-      size: st.size,
+      size: statSync(abs).size,
       truncated,
       // 超长时头尾保留（关键结论通常在尾部），完整文件始终在产出物目录
       content: truncated
@@ -275,6 +308,40 @@ export class WorkspaceManager {
           })
         : content,
     };
+  }
+
+  /**
+   * 读取任务产出物目录内单个文件的**原始字节**（发送附件给用户用，issue #24）。
+   * 与 readTaskArtifact 共用路径安全校验（防穿越/符号链接），但：
+   * - 允许二进制内容（图片/压缩包等）；
+   * - 受 maxBytes 大小上限约束（默认 MAX_ARTIFACT_SEND_BYTES，超出拒绝，由上层降级）。
+   */
+  readTaskArtifactBuffer(
+    workerName: string,
+    taskId: string,
+    relPath: string,
+    maxBytes = MAX_ARTIFACT_SEND_BYTES,
+  ): ReadArtifactBufferResult {
+    const { abs, error } = this.resolveArtifactFile(workerName, taskId, relPath);
+    if (error || !abs) return { ok: false, error };
+    let size: number;
+    try {
+      size = statSync(abs).size;
+    } catch {
+      return { ok: false, error: `文件不存在: ${relPath}` };
+    }
+    if (size > maxBytes) {
+      return {
+        ok: false,
+        error: `文件过大（${formatBytes(size)}），超过发送上限 ${formatBytes(maxBytes)}，请改用 read_artifact 查看或直接到产出物目录取用`,
+      };
+    }
+    try {
+      const buffer = readFileSync(abs);
+      return { ok: true, buffer, size: buffer.length };
+    } catch (e) {
+      return { ok: false, error: `读取失败: ${(e as Error).message}` };
+    }
   }
 
   /** 删除任务工作空间（随任务记录清理时调用） */

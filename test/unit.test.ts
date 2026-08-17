@@ -542,6 +542,18 @@ export async function runUnitTests(): Promise<TestResult[]> {
         t.assert(bad3.ok === false && bad3.error!.includes("目录"), "读取目录应拒绝");
         const bad4 = ws.readTaskArtifact("dev", "T-20250817-0001", "blob.bin");
         t.assert(bad4.ok === false && bad4.error!.includes("二进制"), "二进制文件应拒绝");
+        // 原始字节读取：二进制可读（发送附件用），且校验一致
+        const buf1 = ws.readTaskArtifactBuffer("dev", "T-20250817-0001", "blob.bin");
+        t.assert(buf1.ok && buf1.buffer!.equals(Buffer.from([0x01, 0x00, 0x02, 0xff])), "二进制应可通过 buffer 通道读取");
+        const buf2 = ws.readTaskArtifactBuffer("dev", "T-20250817-0001", "report.txt");
+        t.assert(buf2.ok && buf2.buffer!.toString("utf-8").includes("最终结论"), "文本也应可通过 buffer 通道读取");
+        const buf3 = ws.readTaskArtifactBuffer("dev", "T-20250817-0001", "../secret");
+        t.assert(buf3.ok === false, "buffer 通道同样拒绝目录穿越");
+        const buf4 = ws.readTaskArtifactBuffer("dev", "T-20250817-0001", "data", 100);
+        t.assert(buf4.ok === false && buf4.error!.includes("目录"), "buffer 通道拒绝目录");
+        // 大小上限
+        const buf5 = ws.readTaskArtifactBuffer("dev", "T-20250817-0001", "report.txt", 10);
+        t.assert(buf5.ok === false && buf5.error!.includes("过大"), "超过上限应拒绝");
         const bad5 = ws.readTaskArtifact("dev", "T-20250817-0001", "escape-link");
         t.assert(bad5.ok === false && bad5.error!.includes("符号链接"), "符号链接应拒绝（不跟随逃逸）");
         const bad6 = ws.readTaskArtifact("dev", "T-20250817-0001", "no-such.txt");
@@ -615,6 +627,124 @@ export async function runUnitTests(): Promise<TestResult[]> {
           t.assert(team.listArtifacts("T-NO-SUCH").includes("不存在"), "未知任务应提示不存在");
           t.assert(team.getTaskResult("T-NO-SUCH") === undefined, "未知任务完整结果应为 undefined");
           t.log(manifest);
+        } finally {
+          await team.stop();
+        }
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }),
+  );
+
+  results.push(
+    await runCase("U-30", "产出物发送", "sendArtifact：文件直发 / 文本降级 / 边界校验", async (t) => {
+      const dir = mkdtempSync(join(tmpdir(), "circle-unit-send-"));
+      try {
+        const { AgentTeam } = await import("../src/team/agent-team.js");
+        const { loadConfig } = await import("../src/config.js");
+        const sentFiles: Array<{ chatId: string; fileName: string; content: Buffer; size: number; mimeType?: string; caption?: string }> = [];
+        const sentTexts: string[] = [];
+        const team = new AgentTeam({
+          config: { ...loadConfig(), dataDir: dir },
+          workers: [{ name: "dev", description: "开发 Worker", cwd: join(dir, "workspaces", "dev") }],
+          outbox: async (_c, text) => {
+            sentTexts.push(text);
+          },
+          sendFile: async (chatId, file) => {
+            sentFiles.push({
+              chatId,
+              fileName: file.fileName,
+              content: file.content,
+              size: file.size,
+              mimeType: file.mimeType,
+              caption: file.caption,
+            });
+          },
+          modelRuntime: undefined as never,
+        });
+        try {
+          // 模拟已完成任务 + 归档产出物（文本报告 + 二进制图片 + 超大文件）
+          const task = team.taskStore.create({
+            title: "生成报告与图表",
+            description: "x",
+            status: "completed",
+            priority: "long",
+            workerName: "dev",
+            requestedBy: "user",
+            requestChatId: "chat-1",
+            result: "done",
+            completedAt: Date.now(),
+          });
+          const wsDir = team.workspace.taskWorkspaceDir("dev", task.id);
+          const report = "# 报告\n关键结论：全部通过";
+          writeFileSync(join(wsDir, "report.md"), report);
+          const img = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+          writeFileSync(join(wsDir, "chart.png"), img);
+          const big = Buffer.alloc(21 * 1024 * 1024, 0x41);
+          writeFileSync(join(wsDir, "big.bin"), big);
+          team.workspace.archiveTaskOutput("dev", task.id);
+
+          // 1) 文本文件直发：文件名 / 内容 / MIME / caption
+          const r1 = await team.sendArtifact(task.id, "report.md", "这是最终报告");
+          t.assert(r1.ok, `报告应发送成功：${r1.message}`);
+          const f1 = sentFiles[0]!;
+          t.assertEqual(f1.fileName, "report.md", "文件名应为 report.md");
+          t.assert(f1.content.toString("utf-8") === report, "内容应完整");
+          t.assertEqual(f1.mimeType, "text/markdown", "MIME 应按扩展名推断");
+          t.assertEqual(f1.caption, "这是最终报告", "caption 应使用自定义说明");
+          t.assertEqual(f1.size, Buffer.byteLength(report), "size 应正确");
+
+          // 2) 图片文件：MIME 识别 + 默认 caption
+          const r2 = await team.sendArtifact(task.id, "chart.png");
+          t.assert(r2.ok, `图片应发送成功：${r2.message}`);
+          const f2 = sentFiles[1]!;
+          t.assertEqual(f2.mimeType, "image/png", "图片 MIME 应为 image/png");
+          t.assert((f2.caption ?? "").includes("任务"), "默认 caption 应含任务信息");
+
+          // 3) 越界路径 / 未知任务 / 超大文件被拒
+          const r3 = await team.sendArtifact(task.id, "../../outside.txt");
+          t.assert(!r3.ok && r3.message.includes("无法发送"), "越界路径应被拒绝");
+          const r4 = await team.sendArtifact("T-NO-SUCH", "a.txt");
+          t.assert(!r4.ok && r4.message.includes("不存在"), "未知任务应报错");
+          const r5 = await team.sendArtifact(task.id, "big.bin");
+          t.assert(!r5.ok && r5.message.includes("过大"), "超过 20MB 应被拒绝");
+
+          // 4) 不提供 sendFile 的团队：自动降级为文本，不抛异常
+          const dir2 = mkdtempSync(join(tmpdir(), "circle-unit-send2-"));
+          try {
+            const team2 = new AgentTeam({
+              config: { ...loadConfig(), dataDir: dir2 },
+              workers: [{ name: "dev", description: "dev", cwd: join(dir2, "workspaces", "dev") }],
+              outbox: async (_c, text) => {
+                sentTexts.push(text);
+              },
+              modelRuntime: undefined as never,
+            });
+            const task2 = team2.taskStore.create({
+              title: "无文件通道",
+              description: "x",
+              status: "completed",
+              priority: "short",
+              workerName: "dev",
+              requestedBy: "user",
+              requestChatId: "chat-2",
+              result: "done",
+              completedAt: Date.now(),
+            });
+            const ws2 = team2.workspace.taskWorkspaceDir("dev", task2.id);
+            writeFileSync(join(ws2, "data.csv"), "id,name\n1,a");
+            team2.workspace.archiveTaskOutput("dev", task2.id);
+            const r6 = await team2.sendArtifact(task2.id, "data.csv");
+            t.assert(!r6.ok, "无文件通道应返回 ok=false（已降级）");
+            t.assert(
+              sentTexts.some((x) => x.includes("data.csv") && x.includes("已生成产出物文件")),
+              "降级文本应告知文件名与路径",
+            );
+            await team2.stop();
+          } finally {
+            rmSync(dir2, { recursive: true, force: true });
+          }
+          t.log(`已发送文件: ${sentFiles.map((f) => `${f.fileName}(${f.mimeType})`).join(", ")}`);
         } finally {
           await team.stop();
         }
