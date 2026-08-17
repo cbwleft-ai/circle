@@ -54,7 +54,8 @@ defineTool({
 ```
 
 同时在 `src/team/gateway.ts` 声明方法、在 `AgentTeam` 中实现。
-注意：Coordinator 工具**禁止**执行文件/命令操作（安全边界）。
+注意：Coordinator 工具**禁止**执行写/命令操作（安全边界）；`list_task_outputs` /
+`read_task_output` 为只读访问任务产出物目录的例外。
 
 ### 2.2 新增/扩展 Worker 能力
 

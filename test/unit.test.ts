@@ -10,7 +10,8 @@ import { assessSafety } from "../src/core/safety.js";
 import { TaskStore } from "../src/core/task-store.js";
 import { ScheduleStore } from "../src/core/schedule-store.js";
 import { WorkspaceManager } from "../src/core/workspace.js";
-import { summarizeText } from "../src/team/agent-team.js";
+import { summarizeText } from "../src/core/summarize.js";
+import { listTaskOutputs, readTaskOutput } from "../src/core/task-outputs.js";
 import { runCase, type TestResult } from "./helpers.js";
 
 export async function runUnitTests(): Promise<TestResult[]> {
@@ -475,6 +476,62 @@ export async function runUnitTests(): Promise<TestResult[]> {
         ws.removeTaskWorkspace("worker-a", "T-2");
         t.assert(!existsSync(wsA2), "任务工作空间应被删除");
         t.assert(existsSync(join(archived, "out.txt")), "产出物目录（持久）应保留");
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+        rmSync(agentDir, { recursive: true, force: true });
+      }
+    }),
+  );
+
+  // ---------- 任务产出物只读访问 ----------
+  results.push(
+    await runCase("U-20", "任务产出物", "列出 / 读取 / 路径安全 / 进行中任务", async (t) => {
+      const dir = mkdtempSync(join(tmpdir(), "circle-unit-out-"));
+      const agentDir = mkdtempSync(join(tmpdir(), "circle-unit-out-agent-"));
+      try {
+        const ws = new WorkspaceManager(dir, agentDir);
+        const store = new TaskStore(dir);
+        const task = store.create({
+          title: "测试任务",
+          description: "d",
+          status: "completed",
+          priority: "long",
+          workerName: "worker-a",
+          requestedBy: "user",
+        });
+        t.assert(task.id.startsWith("T-"), `任务编号: ${task.id}`);
+
+        // 进行中任务：tasks/<id> 可读
+        const active = ws.taskWorkspaceDir("worker-a", task.id);
+        writeFileSync(join(active, "report.md"), "# 完整报告\n\n尾部关键结论：成功");
+        mkdirSync(join(active, "data"), { recursive: true });
+        writeFileSync(join(active, "data", "result.txt"), "42");
+
+        const listActive = listTaskOutputs(ws, store, task.id);
+        t.assert(listActive.includes("report.md"), "应列出 report.md");
+        t.assert(listActive.includes("data/result.txt"), "应列出嵌套文件");
+        t.assert(!listActive.includes(".pi"), "不应列出 .pi 技能目录");
+
+        const content = readTaskOutput(ws, store, task.id, "report.md");
+        t.assert(content.includes("尾部关键结论：成功"), "应读取完整文件内容");
+
+        const nested = readTaskOutput(ws, store, task.id, "data/result.txt");
+        t.assert(nested.includes("42"), "应读取嵌套路径文件");
+
+        const traversal = readTaskOutput(ws, store, task.id, "../worker-b/secret.txt");
+        t.assert(traversal.includes("非法路径") || traversal.includes("超出"), "应拦截路径穿越");
+
+        // 归档后 outputs/<id> 可读
+        ws.archiveTaskOutput("worker-a", task.id);
+        const listArchived = listTaskOutputs(ws, store, task.id);
+        t.assert(listArchived.includes("outputs"), "归档后应指向 outputs 目录");
+        t.assert(listArchived.includes("report.md"), "归档后文件仍应可列出");
+
+        const missing = readTaskOutput(ws, store, task.id, "no-such.txt");
+        t.assert(missing.includes("不存在"), "不存在的文件应报错");
+
+        const noTask = listTaskOutputs(ws, store, "T-NOPE-9999");
+        t.assert(noTask.includes("未找到"), "不存在的任务应报错");
       } finally {
         rmSync(dir, { recursive: true, force: true });
         rmSync(agentDir, { recursive: true, force: true });

@@ -172,9 +172,10 @@ sequenceDiagram
 > 定时任务（见 3.3）触发后同样复用「创建 Task → executeTask → reportCompletion」链路，
 > 区别仅在于任务来源为 Scheduler 且汇报文案带 scheduleId。
 >
-> **汇报截断策略**：注入 Coordinator 的执行结果采用「头尾兼顾」摘要（`summarizeText`）——
+> **汇报截断策略**：注入 Coordinator 的执行结果采用「头尾兼顾」摘要（`summarizeText`，见 `src/core/summarize.ts`）——
 > 长文本保留头 1500 + 尾 1500 字符、中间以省略标记连接（关键结论在尾部，保证必达），
-> 完整结果始终存于 TaskStore 与产出物目录；系统兜底直发（Coordinator 不可用）截断为 500 字符。
+> 完整结果始终存于 TaskStore 与产出物目录；Coordinator 可通过 `list_task_outputs` /
+> `read_task_output` 只读访问完整产出物；系统兜底直发（Coordinator 不可用）截断为 500 字符。
 
 ### 3.3 定时任务
 

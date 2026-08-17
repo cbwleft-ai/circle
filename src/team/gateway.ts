@@ -22,4 +22,9 @@ export interface TeamGateway {
   listTasks(status?: string): string;
   /** 定时任务摘要 */
   listSchedules(): string;
+
+  /** 列出任务产出物目录中的文件（只读） */
+  listTaskOutputs(taskId: string): string;
+  /** 读取任务产出物目录中的指定文件（只读） */
+  readTaskOutput(taskId: string, path: string): string;
 }

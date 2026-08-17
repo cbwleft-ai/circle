@@ -86,6 +86,18 @@ export class WorkspaceManager {
   }
 
   /**
+   * 任务产出目录：优先已归档 outputs/<taskId>，否则进行中/失败任务的 tasks/<taskId>。
+   * 均不存在时返回 undefined。
+   */
+  taskOutputDir(workerName: string, taskId: string): string | undefined {
+    const archived = join(this.outputsDir(workerName), taskId);
+    if (existsSync(archived)) return archived;
+    const active = join(this.root, workerName, "tasks", taskId);
+    if (existsSync(active)) return active;
+    return undefined;
+  }
+
+  /**
    * 任务完成后归档产出物：把任务工作空间 tasks/<taskId> 重命名为 outputs/<taskId>。
    * 返回归档后的目录路径。重命名失败时回退为复制 + 删除源目录。
    */

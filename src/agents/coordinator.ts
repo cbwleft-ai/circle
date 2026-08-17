@@ -87,7 +87,8 @@ export class CoordinatorAgent {
    - 短程任务 → 直接派发并把结果汇报给用户；
 3. 定时任务（周期性任务）→ 调用 create_schedule / update_schedule / delete_schedule 管理，把自然语言时间换算成 5 段 cron（如"每天上午 10 点"→"0 10 * * *"）；
 4. 用户询问任务/定时任务状态 → 调用 list_tasks / list_schedules / list_workers 查询并汇报；
-5. 收到系统通知（Worker 完成长程任务、定时任务触发结果）→ 整理后向用户汇报最终结果。
+5. 收到系统通知（Worker 完成长程任务、定时任务触发结果）→ 整理后向用户汇报最终结果；
+6. 需要核对完整产出物（报告、数据文件、日志）或系统通知中的结果被截断 → 调用 list_task_outputs 列出文件，再用 read_task_output 读取指定文件内容。
 
 ## 可用 Worker
 ${workers || "- （暂无 Worker）"}
@@ -106,7 +107,8 @@ ${workers || "- （暂无 Worker）"}
 ## 沟通风格
 - 简洁、结构化，使用中文；
 - 长程任务先确认收到，再跟进；
-- 结果汇报包含任务编号、产出物位置、关键结果。`;
+- 结果汇报包含任务编号、产出物位置、关键结果；
+- 长程任务汇报前，若通知摘要可能被截断，先用 list_task_outputs / read_task_output 读取完整产出再向用户汇报。`;
   }
 
   /** 自定义工具：Coordinator 与团队交互的唯一通道 */
@@ -251,6 +253,35 @@ ${workers || "- （暂无 Worker）"}
             .map((w) => `- ${w.name}: ${w.description}`)
             .join("\n");
           return { content: [{ type: "text", text: text || "暂无 Worker" }], details: {} };
+        },
+      }),
+      defineTool({
+        name: "list_task_outputs",
+        label: "列出任务产出物",
+        description:
+          "列出指定任务产出物目录中的文件（路径、大小、修改时间）。适用于核对 Worker 完整输出、数据文件与日志。",
+        promptSnippet: "列出任务产出物文件",
+        parameters: Type.Object({
+          task_id: Type.String({ description: "任务编号，如 T-20260817-0001" }),
+        }),
+        execute: async (_id, params) => {
+          const text = g.listTaskOutputs(params.task_id);
+          return { content: [{ type: "text", text }], details: {} };
+        },
+      }),
+      defineTool({
+        name: "read_task_output",
+        label: "读取任务产出物",
+        description:
+          "读取指定任务产出物目录中的文件内容（只读）。path 为相对路径，如 report.md 或 data/result.csv。",
+        promptSnippet: "读取任务产出物文件",
+        parameters: Type.Object({
+          task_id: Type.String({ description: "任务编号，如 T-20260817-0001" }),
+          path: Type.String({ description: "产出物相对路径，如 report.md" }),
+        }),
+        execute: async (_id, params) => {
+          const text = g.readTaskOutput(params.task_id, params.path);
+          return { content: [{ type: "text", text }], details: {} };
         },
       }),
     ];

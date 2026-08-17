@@ -15,6 +15,8 @@ import { SchedulerAgent } from "../agents/scheduler.js";
 import { WorkerAgent } from "../agents/worker.js";
 import { LONG_TASK_PATTERNS, type AppConfig } from "../config.js";
 import { log } from "../core/logger.js";
+import { summarizeText } from "../core/summarize.js";
+import { listTaskOutputs as listTaskOutputsImpl, readTaskOutput as readTaskOutputImpl } from "../core/task-outputs.js";
 import { assessSafety, REFUSAL_DESTRUCTIVE, REFUSAL_SENSITIVE, WARNING_CONFIG_STRUCTURE } from "../core/safety.js";
 import { ScheduleStore } from "../core/schedule-store.js";
 import { TaskStore } from "../core/task-store.js";
@@ -316,7 +318,7 @@ export class AgentTeam implements TeamGateway {
   private async reportCompletion(task: Task, result: string, failed: boolean): Promise<void> {
     const chatId = task.requestChatId ?? this.currentChatId;
     const statusWord = failed ? "失败" : "完成";
-    const notification = `（系统通知）Worker「${task.workerName}」报告：任务 ${task.id}「${task.title}」已${statusWord}。\n执行结果：\n${summarizeText(result)}\n\n请整理后向用户汇报最终结果。`;
+    const notification = `（系统通知）Worker「${task.workerName}」报告：任务 ${task.id}「${task.title}」已${statusWord}。\n执行结果：\n${summarizeText(result)}\n\n请整理后向用户汇报最终结果。若需核对完整产出物，请调用 list_task_outputs / read_task_output 读取任务 ${task.id} 的工作目录文件。`;
     try {
       const reply = await this.enqueueCoordinator(() => this.coordinator.respond(notification));
       if (reply) await this.outbox(chatId, reply);
@@ -356,6 +358,14 @@ export class AgentTeam implements TeamGateway {
 
   listSchedules(): string {
     return this.scheduleStore.summarize();
+  }
+
+  listTaskOutputs(taskId: string): string {
+    return listTaskOutputsImpl(this.workspace, this.taskStore, taskId);
+  }
+
+  readTaskOutput(taskId: string, path: string): string {
+    return readTaskOutputImpl(this.workspace, this.taskStore, taskId, path);
   }
 
   /** Scheduler 触发：创建任务并派发 Worker，等待结果 */
@@ -405,24 +415,3 @@ export class AgentTeam implements TeamGateway {
     await this.scheduler.fire(s);
   }
 }
-
-/**
- * 长文本摘要（头尾兼顾）：结果不超过 maxChars 时原样返回；
- * 超过时保留头部 headChars + 尾部 tailChars，中间以省略标记连接。
- * 长任务的关键结论通常在尾部（Worker 提示词要求总结放最后），
- * 因此截断时保尾比保头更重要；完整结果始终已存于 TaskStore 与产出物目录。
- */
-export function summarizeText(
-  text: string,
-  opts: { maxChars?: number; headChars?: number; tailChars?: number } = {},
-): string {
-  const maxChars = opts.maxChars ?? 4000;
-  const headChars = opts.headChars ?? 1500;
-  const tailChars = opts.tailChars ?? 1500;
-  if (text.length <= maxChars) return text;
-  const head = text.slice(0, headChars);
-  const tail = text.slice(-tailChars);
-  const omitted = text.length - headChars - tailChars;
-  return `${head}\n\n…(中间省略 ${omitted} 字符，完整结果已存储)…\n\n${tail}`;
-}
-

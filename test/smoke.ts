@@ -48,6 +48,8 @@ async function main() {
     deleteSchedule: () => undefined,
     listTasks: () => "暂无任务",
     listSchedules: () => "暂无定时任务",
+    listTaskOutputs: () => "暂无产出物",
+    readTaskOutput: () => "（桩）",
   };
 
   console.log("Coordinator 启动…");
