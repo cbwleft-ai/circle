@@ -51,6 +51,7 @@ async function main() {
     listArtifacts: () => "暂无产出物",
     readArtifact: () => "无",
     getTaskResult: () => undefined,
+    sendArtifact: async () => ({ ok: true, message: "已发送" }),
   };
 
   console.log("Coordinator 启动…");

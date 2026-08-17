@@ -2,7 +2,7 @@
  * TeamGateway —— Coordinator 自定义工具与 AgentTeam 之间的接口。
  * Coordinator 只能通过该接口与团队交互，不接触任何执行细节。
  */
-import type { DispatchResult, ScheduledTask, WorkerConfig } from "../core/types.js";
+import type { DispatchResult, ScheduledTask, SendArtifactResult, WorkerConfig } from "../core/types.js";
 
 export interface TeamGateway {
   /** 可用 Worker 列表 */
@@ -29,4 +29,11 @@ export interface TeamGateway {
   readArtifact(taskId: string, relPath: string): string;
   /** 读取任务完整执行结果（未截断的原始结果），无结果时返回 undefined */
   getTaskResult(taskId: string): string | undefined;
+
+  /**
+   * 把指定任务的产出物文件通过 IM 发送给用户（附件形式，issue #24）。
+   * 仅限任务产出物目录内文件（只读 + 路径受限 + 大小上限）；
+   * 通道不支持文件时自动降级为文本提示，不阻塞。
+   */
+  sendArtifact(taskId: string, relPath: string, caption?: string): Promise<SendArtifactResult>;
 }

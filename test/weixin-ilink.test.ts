@@ -10,6 +10,7 @@
  *   U-23 缓存恢复（重启不重复扫码）
  */
 import { createServer, type Server } from "node:http";
+import { createDecipheriv } from "node:crypto";
 import { mkdtempSync, rmSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -23,6 +24,12 @@ interface MockServer {
   qrRequests: number;
   updatesQueue: unknown[];
   sentMessages: Array<{ to: string; text: string }>;
+  /** 发送的所有消息 item（含文件/图片） */
+  sentItems: Array<{ to: string; type: number; item: unknown }>;
+  /** getuploadurl 请求体 */
+  uploadUrlRequests: Array<Record<string, unknown>>;
+  /** CDN 上传收到的密文 */
+  cdnUploads: Buffer[];
   close(): Promise<void>;
 }
 
@@ -32,6 +39,9 @@ function createMockWeixinServer(): Promise<MockServer> {
     qrRequests: 0,
     updatesQueue: [],
     sentMessages: [],
+    sentItems: [],
+    uploadUrlRequests: [],
+    cdnUploads: [],
   };
   // mock 与 state 是同一对象（引用共享），避免浅拷贝导致计数不更新
   const mock = state as MockServer;
@@ -87,7 +97,34 @@ function createMockWeixinServer(): Promise<MockServer> {
         const to = msg.to_user_id ?? "";
         const item = (msg.item_list ?? [])[0];
         state.sentMessages.push({ to, text: item?.text_item?.text ?? "" });
+        state.sentItems.push({ to, type: item?.type ?? 0, item });
         send(200, { ret: 0 });
+      });
+      return;
+    }
+    // 获取上传 URL（文件/图片发送）
+    if (req.method === "POST" && url.pathname === "/ilink/bot/getuploadurl") {
+      let raw = "";
+      req.on("data", (c) => (raw += c));
+      req.on("end", () => {
+        try {
+          state.uploadUrlRequests.push(JSON.parse(raw));
+        } catch {
+          /* ignore */
+        }
+        const port = (server.address() as { port: number }).port;
+        send(200, { upload_full_url: `http://127.0.0.1:${port}/cdn/upload` });
+      });
+      return;
+    }
+    // CDN 上传（AES 密文），响应头返回下载参数
+    if (req.method === "POST" && url.pathname === "/cdn/upload") {
+      const chunks: Buffer[] = [];
+      req.on("data", (c) => chunks.push(c as Buffer));
+      req.on("end", () => {
+        state.cdnUploads.push(Buffer.concat(chunks));
+        res.writeHead(200, { "x-encrypted-param": "mock-download-param" });
+        res.end();
       });
       return;
     }
@@ -232,6 +269,113 @@ export async function runWeixinIlinkTests(): Promise<TestResult[]> {
         t.assert(a2.connected, "第二次应直接连接成功");
         t.assertEqual(mock.qrRequests, qrCountAfterFirst, "不应再次请求二维码");
         await a2.stop();
+      } finally {
+        await mock.close();
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    }),
+  );
+
+  results.push(
+    await runCase("U-28", "微信官方通道", "文件发送：getuploadurl → CDN 加密上传 → type 4 文件消息", async (t) => {
+      const mock = await createMockWeixinServer();
+      const stateDir = mkdtempSync(join(tmpdir(), "circle-wx-file-"));
+      try {
+        const adapter = new WeixinIlinkAdapter({
+          baseUrl: mock.baseUrl,
+          botToken: "mock-bot-token-1",
+          stateDir,
+        });
+        await adapter.start();
+
+        const content = Buffer.from("# 报告\n关键结论：全部通过", "utf-8");
+        await adapter.sendFile("wx:wxuser-1", {
+          fileName: "report.md",
+          content,
+          size: content.length,
+          mimeType: "text/markdown",
+          caption: "报告来了",
+        });
+
+        // 1) getuploadurl 请求：字段完整（media_type=3 文件，md5/aeskey/size 齐备）
+        await poll(() => mock.uploadUrlRequests.length > 0, {
+          timeoutMs: 15_000,
+          msg: "应发起 getuploadurl",
+        });
+        const up = mock.uploadUrlRequests[0]!;
+        t.assert(up.media_type === 3, `文件 media_type 应为 3，实际 ${up.media_type}`);
+        t.assert(up.to_user_id === "wxuser-1", "to_user_id 应为 wxuser-1");
+        t.assert(up.rawsize === content.length, "rawsize 应为明文大小");
+        t.assert(typeof up.rawfilemd5 === "string" && up.rawfilemd5.length === 32, "应有明文 md5");
+        t.assert(typeof up.aeskey === "string" && up.aeskey.length === 32, "应有 16 字节 aeskey(hex)");
+        t.assert(typeof up.filekey === "string" && up.filekey.length === 32, "应有 filekey");
+        t.assert(up.filesize === Math.ceil((content.length + 1) / 16) * 16, "filesize 应为 AES 填充后大小");
+
+        // 2) CDN 上传：收到 AES-128-ECB 密文，可用发送消息中的 aes_key 解密还原
+        await poll(() => mock.cdnUploads.length > 0, { timeoutMs: 15_000, msg: "应上传 CDN" });
+        const sentItem = mock.sentItems.find((s) => s.type === 4);
+        t.assert(sentItem !== undefined, "应发送 type 4 文件消息");
+        const fileItem = (sentItem!.item as { file_item: any }).file_item;
+        t.assert(fileItem.file_name === "report.md", "file_name 应为 report.md");
+        t.assert(fileItem.len === String(content.length), "len 应为明文大小字符串");
+        t.assert(
+          fileItem.media.encrypt_query_param === "mock-download-param",
+          "encrypt_query_param 应来自 CDN 响应头",
+        );
+        const aesKeyBase64 = fileItem.media.aes_key as string;
+        const aeskey = Buffer.from(Buffer.from(aesKeyBase64, "base64").toString("utf8"), "hex");
+        const decipher = createDecipheriv("aes-128-ecb", aeskey, null);
+        const plain = Buffer.concat([
+          decipher.update(mock.cdnUploads[0]!),
+          decipher.final(),
+        ]);
+        t.assert(plain.equals(content), "CDN 密文解密后应与原文一致（加密链路正确）");
+
+        // 3) 说明文字先以文本消息发出
+        const caption = mock.sentMessages.find((m) => m.text.includes("报告来了"));
+        t.assert(caption !== undefined, "caption 应以文本消息先发送");
+        t.assert(caption!.to === "wxuser-1", "caption 接收方正确");
+        await adapter.stop();
+      } finally {
+        await mock.close();
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    }),
+  );
+
+  results.push(
+    await runCase("U-29", "微信官方通道", "图片发送：type 2 图片消息（media_type=1）", async (t) => {
+      const mock = await createMockWeixinServer();
+      const stateDir = mkdtempSync(join(tmpdir(), "circle-wx-img-"));
+      try {
+        const adapter = new WeixinIlinkAdapter({
+          baseUrl: mock.baseUrl,
+          botToken: "mock-bot-token-1",
+          stateDir,
+        });
+        await adapter.start();
+
+        const img = Buffer.from("\x89PNG\r\n\x1a\n mock-image-bytes");
+        await adapter.sendFile("wx:wxuser-1", {
+          fileName: "chart.png",
+          content: img,
+          size: img.length,
+          mimeType: "image/png",
+        });
+
+        await poll(() => mock.uploadUrlRequests.length > 0, {
+          timeoutMs: 15_000,
+          msg: "应发起 getuploadurl",
+        });
+        t.assert(mock.uploadUrlRequests[0]!.media_type === 1, `图片 media_type 应为 1，实际 ${mock.uploadUrlRequests[0]!.media_type}`);
+        await poll(() => mock.sentItems.length > 0, { timeoutMs: 15_000, msg: "应发送图片消息" });
+        const imgItem = mock.sentItems.find((s) => s.type === 2);
+        t.assert(imgItem !== undefined, "应发送 type 2 图片消息");
+        const imageItem = (imgItem!.item as { image_item: any }).image_item;
+        t.assert(imageItem.media.encrypt_query_param === "mock-download-param", "图片应带下载参数");
+        t.assert(imageItem.mid_size === Math.ceil((img.length + 1) / 16) * 16, "mid_size 应为密文大小");
+        t.assert(!mock.sentMessages.some((m) => m.text.length > 0), "无 caption 时不应发送文本消息");
+        await adapter.stop();
       } finally {
         await mock.close();
         rmSync(stateDir, { recursive: true, force: true });

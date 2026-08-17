@@ -37,7 +37,7 @@ Circle 采用「单一入口 + 角色分离」的协作架构。使用者只感�
 - 基于 pi SDK 的 `createAgentSession` 创建**只读会话**：
   - `noTools: "builtin"` —— 不启用任何内置执行工具（read/bash/edit/write 等），
     **从工具层面保证 Coordinator 无法修改/破坏运行环境**；
-  - 仅注册 10 个自定义工具，作为与团队交互的唯一通道：
+  - 仅注册 11 个自定义工具，作为与团队交互的唯一通道：
 
 | 工具 | 作用 | 底层 |
 | --- | --- | --- |
@@ -51,6 +51,7 @@ Circle 采用「单一入口 + 角色分离」的协作架构。使用者只感�
 | `task_result` | 读取任务**完整执行结果**（未截断） | `TaskStore.get().result` |
 | `list_artifacts` | 查看任务**产出物清单**（路径 + 大小） | `WorkspaceManager.listTaskArtifacts` |
 | `read_artifact` | 读取任务**产出物文件**内容（只读、受限） | `WorkspaceManager.readTaskArtifact` |
+| `send_artifact` | 把任务**产出物文件**发送给用户（附件，≤20MB） | `TeamGateway.sendArtifact` → `ImAdapter.sendFile` |
 
 - 系统提示词中固化角色边界与安全规则（拒绝破坏性/敏感请求、长程任务先确认等）；
 - **长程任务处理**：`dispatch_task(long=true)` 后工具立即返回
@@ -183,6 +184,11 @@ sequenceDiagram
 > 可随时通过 `task_result`（完整结果）、`list_artifacts`（产出物清单）、
 > `read_artifact`（读取产出物文件，只读、防目录穿越、二进制拒绝）直接读取核对
 > Worker 实际产物（归档于 `outputs/<taskId>/`；失败任务则读取 `tasks/<taskId>/` 便于排查）。
+>
+> **产物可直接发送（issue #24）**：Coordinator 可通过 `send_artifact` 把产出物文件**作为附件
+> 直接发送给用户**（微信 iLink 通道走官方上传链路：getuploadurl → AES-128-ECB 加密 → CDN →
+> type 4 文件/type 2 图片消息；上限 20MB）。通道不支持文件时自动降级为文字提示（附文件名/大小/路径），
+> 不阻塞主流程。
 
 ### 3.3 定时任务
 
@@ -296,10 +302,10 @@ sequenceDiagram
 | cron | `src/core/cron.ts` | 5 段 cron 解析、nextRun、matches |
 | 任务存储 | `src/core/task-store.ts` | JSON 持久化、状态机、30 天清理 |
 | 定时任务存储 | `src/core/schedule-store.ts` | JSON 持久化、触发历史 |
-| 工作空间 | `src/core/workspace.ts` | Worker 目录/任务工作空间（`tasks/<id>`）/产出物归档（`outputs/<id>`）/过期清理；产出物只读访问（清单 + 文件读取，防目录穿越/二进制拒绝） |
-| 文本工具 | `src/core/text.ts` | `summarizeText`（头尾兼顾摘要）、`formatBytes` |
-| IM 适配器 | `src/im/*` | 统一接口，console/http/weixin(官方)/wechat(wechaty) 四实现 |
-| 团队 | `src/team/agent-team.ts` | 组合三角色、消息路由、轮次状态检查、结果汇报、产出物网关（`listArtifacts`/`readArtifact`/`getTaskResult`） |
+| 工作空间 | `src/core/workspace.ts` | Worker 目录/任务工作空间（`tasks/<id>`）/产出物归档（`outputs/<id>`）/过期清理；产出物只读访问（清单 + 文本读取 + 原始字节读取，防目录穿越/二进制拒绝/大小上限） |
+| 文本工具 | `src/core/text.ts` | `summarizeText`（头尾兼顾摘要）、`formatBytes`、`inferMimeType` |
+| IM 适配器 | `src/im/*` | 统一接口，console/http/weixin(官方)/wechat(wechaty) 四实现；`sendFile` 可选（微信通道支持文件/图片附件） |
+| 团队 | `src/team/agent-team.ts` | 组合三角色、消息路由、轮次状态检查、结果汇报、产出物网关（`listArtifacts`/`readArtifact`/`getTaskResult`/`sendArtifact`） |
 
 ## 5. 数据模型
 

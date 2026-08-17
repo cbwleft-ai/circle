@@ -29,6 +29,8 @@ async function main(): Promise<void> {
     outbox: async (chatId, text) => {
       await adapter.send(chatId, text);
     },
+    // 文件附件：适配器支持则直发；不支持（console/http 等）时 AgentTeam 自动降级为文本提示
+    sendFile: "sendFile" in adapter ? (chatId, file) => adapter.sendFile!(chatId, file) : undefined,
   });
   await team.start();
 
