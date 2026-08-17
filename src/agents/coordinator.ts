@@ -88,6 +88,11 @@ export class CoordinatorAgent {
 3. 定时任务（周期性任务）→ 调用 create_schedule / update_schedule / delete_schedule 管理，把自然语言时间换算成 5 段 cron（如"每天上午 10 点"→"0 10 * * *"）；
 4. 用户询问任务/定时任务状态 → 调用 list_tasks / list_schedules / list_workers 查询并汇报；
 5. 收到系统通知（Worker 完成长程任务、定时任务触发结果）→ 整理后向用户汇报最终结果。
+   注意：通知中的执行结果可能是「摘要」（长文本头尾保留、中间省略，完整结果已存储）。
+   当用户需要完整信息、或需要核对 Worker 实际产出物时，直接调用下列工具读取，不必反复要求 Worker 转述：
+   - task_result：读取任务完整执行结果（未截断）；
+   - list_artifacts：查看产出物文件清单（路径 + 大小）；
+   - read_artifact：读取指定产出物文件内容（只读）。
 
 ## 可用 Worker
 ${workers || "- （暂无 Worker）"}
@@ -101,7 +106,9 @@ ${workers || "- （暂无 Worker）"}
 1. 拒绝破坏性操作：删除目录/文件、rm -rf、格式化、清空数据库、关机重启、强推覆盖等 → 直接拒绝，说明原因，绝不派发；
 2. 拒绝敏感信息：读取/返回 API Key、密码、私钥、.env、SSH 凭据等**真实值** → 直接拒绝，绝不派发；
 3. 配置结构/格式/字段调研类任务（如"查询 token 字段的格式""梳理配置项说明"）属于合法任务，应正常派发；但只允许处理结构、格式、字段名与示例，禁止读取或返回任何真实私密值；
-4. 你不具备任何文件/命令执行能力，请勿假装执行。
+4. 你不具备任何文件/命令执行能力，请勿假装执行；
+5. task_result / list_artifacts / read_artifact 仅用于读取**任务产出物**（只读、路径受限），
+   不授予任何写权限，也不能访问产出物目录以外的文件；产出物中不应包含真实密钥/密码等敏感值。
 
 ## 沟通风格
 - 简洁、结构化，使用中文；
@@ -251,6 +258,55 @@ ${workers || "- （暂无 Worker）"}
             .map((w) => `- ${w.name}: ${w.description}`)
             .join("\n");
           return { content: [{ type: "text", text: text || "暂无 Worker" }], details: {} };
+        },
+      }),
+      defineTool({
+        name: "task_result",
+        label: "读取任务完整结果",
+        description:
+          "读取指定任务的完整执行结果文本（Worker 汇报的原始全文，未被截断）。当汇报中的结果被截断为摘要、或用户需要尾部关键结论时使用。",
+        promptSnippet: "读取任务完整结果",
+        parameters: Type.Object({
+          taskId: Type.String({ description: "任务编号，如 T-20250813-0001" }),
+        }),
+        execute: async (_id, params) => {
+          const text = g.getTaskResult(params.taskId);
+          if (!text) {
+            return {
+              content: [{ type: "text", text: `任务 ${params.taskId} 不存在或暂无结果。` }],
+              details: {},
+            };
+          }
+          return { content: [{ type: "text", text }], details: {} };
+        },
+      }),
+      defineTool({
+        name: "list_artifacts",
+        label: "查看任务产出物清单",
+        description:
+          "列出指定任务 Worker 实际产出的文件清单（相对路径 + 大小）。任务完成后可用；用于核对完整产物、定位报告/数据/日志文件，避免仅依赖 Worker 转述。",
+        promptSnippet: "查看任务产出物清单",
+        parameters: Type.Object({
+          taskId: Type.String({ description: "任务编号，如 T-20250813-0001" }),
+        }),
+        execute: async (_id, params) => {
+          const text = g.listArtifacts(params.taskId);
+          return { content: [{ type: "text", text }], details: {} };
+        },
+      }),
+      defineTool({
+        name: "read_artifact",
+        label: "读取任务产出物文件",
+        description:
+          "读取指定任务产出物目录中的单个文件内容（只读；单文件最多约 20KB，超长保留头尾并标注；二进制文件不可读）。先调用 list_artifacts 获取文件路径。",
+        promptSnippet: "读取任务产出物文件",
+        parameters: Type.Object({
+          taskId: Type.String({ description: "任务编号，如 T-20250813-0001" }),
+          path: Type.String({ description: "产出物目录内的相对文件路径（来自 list_artifacts）" }),
+        }),
+        execute: async (_id, params) => {
+          const text = g.readArtifact(params.taskId, params.path);
+          return { content: [{ type: "text", text }], details: {} };
         },
       }),
     ];

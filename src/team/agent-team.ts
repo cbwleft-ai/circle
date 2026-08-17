@@ -18,6 +18,7 @@ import { log } from "../core/logger.js";
 import { assessSafety, REFUSAL_DESTRUCTIVE, REFUSAL_SENSITIVE, WARNING_CONFIG_STRUCTURE } from "../core/safety.js";
 import { ScheduleStore } from "../core/schedule-store.js";
 import { TaskStore } from "../core/task-store.js";
+import { formatBytes, summarizeText } from "../core/text.js";
 import type {
   ChatMessage,
   DispatchResult,
@@ -316,7 +317,7 @@ export class AgentTeam implements TeamGateway {
   private async reportCompletion(task: Task, result: string, failed: boolean): Promise<void> {
     const chatId = task.requestChatId ?? this.currentChatId;
     const statusWord = failed ? "失败" : "完成";
-    const notification = `（系统通知）Worker「${task.workerName}」报告：任务 ${task.id}「${task.title}」已${statusWord}。\n执行结果：\n${summarizeText(result)}\n\n请整理后向用户汇报最终结果。`;
+    const notification = `（系统通知）Worker「${task.workerName}」报告：任务 ${task.id}「${task.title}」已${statusWord}。\n执行结果（摘要）：\n${summarizeText(result)}\n\n如用户需要核对完整结果或 Worker 实际产出，可直接调用以下工具读取（无需让 Worker 转述）：\n- task_result：读取完整执行结果（未截断）\n- list_artifacts：查看产出物文件清单（路径 + 大小）\n- read_artifact：读取指定产出物文件内容\n\n请整理后向用户汇报最终结果。`;
     try {
       const reply = await this.enqueueCoordinator(() => this.coordinator.respond(notification));
       if (reply) await this.outbox(chatId, reply);
@@ -324,7 +325,7 @@ export class AgentTeam implements TeamGateway {
       log.error("team", `任务结果汇报失败: ${(e as Error).message}`);
       await this.outbox(
         chatId,
-        `任务 ${task.id} 已${statusWord}（系统自动汇报）：\n${summarizeText(result, { maxChars: 500 })}`,
+        `任务 ${task.id} 已${statusWord}（系统自动汇报）：\n${summarizeText(result, { maxChars: 500 })}\n\n完整结果与产出物文件位于 ${this.workspace.taskArtifactRoot(task.workerName, task.id) ?? "产出物目录"}，可随时要求我读取核对。`,
       );
     }
   }
@@ -356,6 +357,41 @@ export class AgentTeam implements TeamGateway {
 
   listSchedules(): string {
     return this.scheduleStore.summarize();
+  }
+
+  // ============ 产出物访问（issue #21：Coordinator 直接读取 Worker 完整产出） ============
+
+  listArtifacts(taskId: string): string {
+    const task = this.taskStore.get(taskId);
+    if (!task) return `任务 ${taskId} 不存在。`;
+    const entries = this.workspace.listTaskArtifacts(task.workerName, taskId);
+    if (entries.length === 0) {
+      return `任务 ${taskId}「${task.title}」暂无产出物文件。`;
+    }
+    const files = entries.filter((e) => e.type === "file");
+    const dirs = entries.filter((e) => e.type === "dir");
+    const lines: string[] = [
+      `任务 ${taskId}「${task.title}」产出物清单（${files.length} 个文件${dirs.length > 0 ? `，${dirs.length} 个目录` : ""}）：`,
+    ];
+    for (const e of entries) {
+      lines.push(e.type === "dir" ? `  📁 ${e.path}` : `  📄 ${e.path}（${formatBytes(e.size)}）`);
+    }
+    return lines.join("\n");
+  }
+
+  readArtifact(taskId: string, relPath: string): string {
+    const task = this.taskStore.get(taskId);
+    if (!task) return `任务 ${taskId} 不存在。`;
+    const res = this.workspace.readTaskArtifact(task.workerName, taskId, relPath);
+    if (!res.ok) return `读取失败：${res.error}`;
+    const truncatedNote = res.truncated
+      ? `（内容超长，已保留头尾；完整文件位于产出物目录 ${this.workspace.taskArtifactRoot(task.workerName, task.id) ?? "产出物目录"}）`
+      : "";
+    return `文件 ${relPath}（${formatBytes(res.size ?? 0)}${truncatedNote}）：\n\n${res.content}`;
+  }
+
+  getTaskResult(taskId: string): string | undefined {
+    return this.taskStore.get(taskId)?.result;
   }
 
   /** Scheduler 触发：创建任务并派发 Worker，等待结果 */
@@ -407,22 +443,8 @@ export class AgentTeam implements TeamGateway {
 }
 
 /**
- * 长文本摘要（头尾兼顾）：结果不超过 maxChars 时原样返回；
- * 超过时保留头部 headChars + 尾部 tailChars，中间以省略标记连接。
- * 长任务的关键结论通常在尾部（Worker 提示词要求总结放最后），
- * 因此截断时保尾比保头更重要；完整结果始终已存于 TaskStore 与产出物目录。
+ * 长文本摘要（头尾兼顾）——自 core/text 转发，保持既有引用兼容。
+ * 完整实现见 src/core/text.ts。
  */
-export function summarizeText(
-  text: string,
-  opts: { maxChars?: number; headChars?: number; tailChars?: number } = {},
-): string {
-  const maxChars = opts.maxChars ?? 4000;
-  const headChars = opts.headChars ?? 1500;
-  const tailChars = opts.tailChars ?? 1500;
-  if (text.length <= maxChars) return text;
-  const head = text.slice(0, headChars);
-  const tail = text.slice(-tailChars);
-  const omitted = text.length - headChars - tailChars;
-  return `${head}\n\n…(中间省略 ${omitted} 字符，完整结果已存储)…\n\n${tail}`;
-}
+export { summarizeText } from "../core/text.js";
 

@@ -37,7 +37,7 @@ Circle 采用「单一入口 + 角色分离」的协作架构。使用者只感�
 - 基于 pi SDK 的 `createAgentSession` 创建**只读会话**：
   - `noTools: "builtin"` —— 不启用任何内置执行工具（read/bash/edit/write 等），
     **从工具层面保证 Coordinator 无法修改/破坏运行环境**；
-  - 仅注册 7 个自定义工具，作为与团队交互的唯一通道：
+  - 仅注册 10 个自定义工具，作为与团队交互的唯一通道：
 
 | 工具 | 作用 | 底层 |
 | --- | --- | --- |
@@ -48,6 +48,9 @@ Circle 采用「单一入口 + 角色分离」的协作架构。使用者只感�
 | `list_tasks` | 查询任务状态 | `TaskStore.summarize` |
 | `list_schedules` | 查询定时任务 | `ScheduleStore.summarize` |
 | `list_workers` | 查询可用 Worker | Worker 注册表 |
+| `task_result` | 读取任务**完整执行结果**（未截断） | `TaskStore.get().result` |
+| `list_artifacts` | 查看任务**产出物清单**（路径 + 大小） | `WorkspaceManager.listTaskArtifacts` |
+| `read_artifact` | 读取任务**产出物文件**内容（只读、受限） | `WorkspaceManager.readTaskArtifact` |
 
 - 系统提示词中固化角色边界与安全规则（拒绝破坏性/敏感请求、长程任务先确认等）；
 - **长程任务处理**：`dispatch_task(long=true)` 后工具立即返回
@@ -175,6 +178,11 @@ sequenceDiagram
 > **汇报截断策略**：注入 Coordinator 的执行结果采用「头尾兼顾」摘要（`summarizeText`）——
 > 长文本保留头 1500 + 尾 1500 字符、中间以省略标记连接（关键结论在尾部，保证必达），
 > 完整结果始终存于 TaskStore 与产出物目录；系统兜底直发（Coordinator 不可用）截断为 500 字符。
+>
+> **完整产物可核对（issue #21）**：Coordinator 不再只能依赖摘要/Worker 转述——任务完成后
+> 可随时通过 `task_result`（完整结果）、`list_artifacts`（产出物清单）、
+> `read_artifact`（读取产出物文件，只读、防目录穿越、二进制拒绝）直接读取核对
+> Worker 实际产物（归档于 `outputs/<taskId>/`；失败任务则读取 `tasks/<taskId>/` 便于排查）。
 
 ### 3.3 定时任务
 
@@ -288,9 +296,10 @@ sequenceDiagram
 | cron | `src/core/cron.ts` | 5 段 cron 解析、nextRun、matches |
 | 任务存储 | `src/core/task-store.ts` | JSON 持久化、状态机、30 天清理 |
 | 定时任务存储 | `src/core/schedule-store.ts` | JSON 持久化、触发历史 |
-| 工作空间 | `src/core/workspace.ts` | Worker 目录/任务工作空间（`tasks/<id>`）/产出物归档（`outputs/<id>`）/过期清理 |
+| 工作空间 | `src/core/workspace.ts` | Worker 目录/任务工作空间（`tasks/<id>`）/产出物归档（`outputs/<id>`）/过期清理；产出物只读访问（清单 + 文件读取，防目录穿越/二进制拒绝） |
+| 文本工具 | `src/core/text.ts` | `summarizeText`（头尾兼顾摘要）、`formatBytes` |
 | IM 适配器 | `src/im/*` | 统一接口，console/http/weixin(官方)/wechat(wechaty) 四实现 |
-| 团队 | `src/team/agent-team.ts` | 组合三角色、消息路由、轮次状态检查、结果汇报 |
+| 团队 | `src/team/agent-team.ts` | 组合三角色、消息路由、轮次状态检查、结果汇报、产出物网关（`listArtifacts`/`readArtifact`/`getTaskResult`） |
 
 ## 5. 数据模型
 

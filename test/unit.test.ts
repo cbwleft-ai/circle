@@ -2,7 +2,7 @@
  * 单元测试：安全评估 / cron / 任务存储 / 定时任务存储 / 工作空间 / IM 适配器。
  * 全部确定性执行，不依赖 LLM。
  */
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseCron, nextRun, matches } from "../src/core/cron.js";
@@ -478,6 +478,148 @@ export async function runUnitTests(): Promise<TestResult[]> {
       } finally {
         rmSync(dir, { recursive: true, force: true });
         rmSync(agentDir, { recursive: true, force: true });
+      }
+    }),
+  );
+
+  // ---------- 产出物访问（issue #21：Coordinator 直接读取 Worker 完整产出） ----------
+  results.push(
+    await runCase("U-26", "产出物访问", "产出物清单 / 只读文件读取 / 路径安全约束", async (t) => {
+      const dir = mkdtempSync(join(tmpdir(), "circle-unit-art-"));
+      const agentDir = mkdtempSync(join(tmpdir(), "circle-unit-art-agent-"));
+      try {
+        const ws = new WorkspaceManager(dir, agentDir);
+        const wsDir = ws.taskWorkspaceDir("dev", "T-20250817-0001");
+        // 产出：短报告、超长报告、子目录数据文件、二进制文件、指向外部的符号链接
+        writeFileSync(join(wsDir, "report.txt"), "最终结论：任务完成\n共处理 100 条记录");
+        const longBody = "H".repeat(12_000) + "中段内容" + "T-尾部结论".repeat(2000);
+        writeFileSync(join(wsDir, "long-report.txt"), longBody);
+        mkdirSync(join(wsDir, "data"));
+        writeFileSync(join(wsDir, "data", "data.csv"), "id,name\n1,alice\n2,bob");
+        writeFileSync(join(wsDir, "blob.bin"), Buffer.from([0x01, 0x00, 0x02, 0xff]));
+        const outside = mkdtempSync(join(tmpdir(), "circle-unit-art-out-"));
+        writeFileSync(join(outside, "leak.txt"), "不应被读取");
+        try {
+          symlinkSync(join(outside, "leak.txt"), join(wsDir, "escape-link"));
+        } catch {
+          /* 链接失败（如 Windows 权限）时跳过该项 */
+        }
+
+        // 归档后 outputs/<taskId>/ 为产出物根目录
+        const archived = ws.archiveTaskOutput("dev", "T-20250817-0001");
+        t.assert(ws.taskArtifactRoot("dev", "T-20250817-0001") === archived, "已完成任务应解析到 outputs/<taskId>");
+
+        // 清单：文件 + 目录 + 大小
+        const entries = ws.listTaskArtifacts("dev", "T-20250817-0001");
+        const paths = entries.map((e) => e.path);
+        t.assert(paths.includes("report.txt"), `清单应含 report.txt，实际 ${paths.join(", ")}`);
+        t.assert(paths.includes("long-report.txt"), "清单应含 long-report.txt");
+        t.assert(paths.includes("data/"), "清单应含 data/ 目录");
+        t.assert(paths.includes("data/data.csv"), "清单应含 data/data.csv");
+        const rep = entries.find((e) => e.path === "report.txt")!;
+        t.assert(rep.size > 0 && rep.type === "file", "report.txt 应记录大小");
+
+        // 正常读取
+        const r1 = ws.readTaskArtifact("dev", "T-20250817-0001", "report.txt");
+        t.assert(r1.ok && r1.content!.includes("最终结论"), "应能读取文本内容");
+        t.assert(r1.truncated === false, "短文件不应截断");
+        const r2 = ws.readTaskArtifact("dev", "T-20250817-0001", "data/data.csv");
+        t.assert(r2.ok && r2.content!.includes("alice"), "应能读取子目录文件");
+
+        // 超长文件：头尾保留 + 省略标记（关键结论在尾部，不丢失）
+        const r3 = ws.readTaskArtifact("dev", "T-20250817-0001", "long-report.txt");
+        t.assert(r3.ok && r3.truncated === true, "超长文件应标记截断");
+        t.assert(r3.content!.startsWith("H".repeat(8000)), "应保留头部");
+        t.assert(r3.content!.endsWith("T-尾部结论".repeat(500)), "应保留尾部关键结论");
+        t.assert(r3.content!.includes("中间省略"), "应标注中间省略");
+
+        // 路径安全约束：目录穿越 / 绝对路径 / 目录 / 二进制 / 符号链接 / 不存在
+        const bad1 = ws.readTaskArtifact("dev", "T-20250817-0001", "../tasks/T-20250817-0001/report.txt");
+        t.assert(bad1.ok === false, "目录穿越应被拒绝");
+        const bad2 = ws.readTaskArtifact("dev", "T-20250817-0001", "/etc/passwd");
+        t.assert(bad2.ok === false, "绝对路径应被拒绝");
+        const bad3 = ws.readTaskArtifact("dev", "T-20250817-0001", "data");
+        t.assert(bad3.ok === false && bad3.error!.includes("目录"), "读取目录应拒绝");
+        const bad4 = ws.readTaskArtifact("dev", "T-20250817-0001", "blob.bin");
+        t.assert(bad4.ok === false && bad4.error!.includes("二进制"), "二进制文件应拒绝");
+        const bad5 = ws.readTaskArtifact("dev", "T-20250817-0001", "escape-link");
+        t.assert(bad5.ok === false && bad5.error!.includes("符号链接"), "符号链接应拒绝（不跟随逃逸）");
+        const bad6 = ws.readTaskArtifact("dev", "T-20250817-0001", "no-such.txt");
+        t.assert(bad6.ok === false && bad6.error!.includes("不存在"), "不存在文件应报错");
+        const bad7 = ws.readTaskArtifact("dev", "T-20250817-9999", "report.txt");
+        t.assert(bad7.ok === false, "无产出物的任务应报错");
+
+        // 失败任务（未归档）：工作空间 tasks/<taskId> 仍可访问（便于排查）
+        const failWs = ws.taskWorkspaceDir("dev", "T-FAIL-0001");
+        writeFileSync(join(failWs, "fail.log"), "error: 网络超时");
+        t.assert(ws.taskArtifactRoot("dev", "T-FAIL-0001") === failWs, "失败任务应解析到 tasks/<taskId>");
+        const rf = ws.readTaskArtifact("dev", "T-FAIL-0001", "fail.log");
+        t.assert(rf.ok && rf.content!.includes("网络超时"), "失败任务日志应可读取");
+
+        // 归档后的 outputs 持久保留
+        t.assert(existsSync(join(archived, "report.txt")), "产出物目录应持久保留");
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+        rmSync(agentDir, { recursive: true, force: true });
+      }
+    }),
+  );
+
+  results.push(
+    await runCase("U-27", "产出物访问", "TeamGateway：listArtifacts / readArtifact / getTaskResult", async (t) => {
+      const dir = mkdtempSync(join(tmpdir(), "circle-unit-gw-"));
+      try {
+        // 直接构造 AgentTeam（不 start，避免依赖 LLM），仅验证网关方法
+        const { AgentTeam } = await import("../src/team/agent-team.js");
+        const { loadConfig } = await import("../src/config.js");
+        const team = new AgentTeam({
+          config: { ...loadConfig(), dataDir: dir },
+          workers: [{ name: "dev", description: "开发 Worker", cwd: join(dir, "workspaces", "dev") }],
+          outbox: async () => {},
+          modelRuntime: undefined as never,
+        });
+        try {
+          const task = team.taskStore.create({
+            title: "生成报告",
+            description: "生成 report.md",
+            status: "completed",
+            priority: "long",
+            workerName: "dev",
+            requestedBy: "user",
+            result: "完整结果全文：已完成，产出 report.md（此文本不应被截断）",
+            completedAt: Date.now(),
+          });
+          // 模拟 Worker 产出并归档
+          const wsDir = team.workspace.taskWorkspaceDir("dev", task.id);
+          writeFileSync(join(wsDir, "report.md"), "# 报告\n关键结论：全部通过");
+          writeFileSync(join(wsDir, "raw.log"), "line1\nline2");
+          team.workspace.archiveTaskOutput("dev", task.id);
+
+          // listArtifacts：包含文件与大小
+          const manifest = team.listArtifacts(task.id);
+          t.assert(manifest.includes("report.md"), `清单应含 report.md：${manifest}`);
+          t.assert(manifest.includes("raw.log"), "清单应含 raw.log");
+          t.assert(manifest.includes("B"), "清单应含大小信息");
+
+          // readArtifact：读取内容；越界路径拒绝
+          const content = team.readArtifact(task.id, "report.md");
+          t.assert(content.includes("关键结论：全部通过"), "应能读取产出物内容");
+          const denied = team.readArtifact(task.id, "../../outside.txt");
+          t.assert(denied.includes("读取失败"), "越界路径应返回读取失败");
+
+          // getTaskResult：完整结果未被截断
+          const full = team.getTaskResult(task.id);
+          t.assert(full === "完整结果全文：已完成，产出 report.md（此文本不应被截断）", "应返回完整结果");
+
+          // 未知任务
+          t.assert(team.listArtifacts("T-NO-SUCH").includes("不存在"), "未知任务应提示不存在");
+          t.assert(team.getTaskResult("T-NO-SUCH") === undefined, "未知任务完整结果应为 undefined");
+          t.log(manifest);
+        } finally {
+          await team.stop();
+        }
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
       }
     }),
   );
