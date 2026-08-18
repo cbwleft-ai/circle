@@ -115,18 +115,37 @@ Coordinator：⚠️ 安全拦截：该请求涉及敏感信息（密钥/口令/
 基于腾讯官方开源的 [openclaw-weixin](https://github.com/Tencent/openclaw-weixin) bot API
 （`ilinkai.weixin.qq.com`），扫码登录获取 bot token，官方机制、无需逆向协议。
 
+### 4.0 一键启动脚本（推荐）
+
+项目自带服务管理脚本 `scripts/circle.sh`，固化微信适配器与数据目录配置，
+通过 systemd 用户服务托管（脱离终端会话，重启终端/机器不影响运行）：
+
+```bash
+./scripts/circle.sh start      # 启动（IM=weixin，数据目录 ~/.circle/data）
+./scripts/circle.sh restart    # 重启（修改代码后常用）
+./scripts/circle.sh stop       # 停止
+./scripts/circle.sh status     # 查看服务状态
+./scripts/circle.sh logs -f    # 跟随查看运行日志
+./scripts/circle.sh log-file   # 打印数据目录日志文件路径
+```
+
+日志统一写入 `~/.circle/data/logs/circle.log`（按天轮转），stdout 进入 systemd journal。
+也可手动启动（等价于脚本 start 的行为）：
+
 ```bash
 export CIRCLE_IM_ADAPTER=weixin
+export CIRCLE_DATA_DIR=~/.circle/data
+export CIRCLE_AGENT_DIR=~/.pi/agent
 npm start
 ```
 
 首次启动会进入扫码登录：终端打印二维码 URL，用微信扫码并确认后自动连接；
-登录状态缓存于 `data/weixin/`，**重启后自动恢复，无需重复扫码**。
+登录状态缓存于 `~/.circle/data/weixin/`，**重启后自动恢复，无需重复扫码**。
 
 也可用环境变量直接指定已登录的 bot token（跳过扫码）：
 
 ```bash
-export CIRCLE_WEIXIN_BOT_TOKEN=你的bot_token   # 从 data/weixin/*.json 中获取
+export CIRCLE_WEIXIN_BOT_TOKEN=你的bot_token   # 从 ~/.circle/data/weixin/*.json 中获取
 ```
 
 | 环境变量 | 说明 |
@@ -179,7 +198,7 @@ npm start
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `CIRCLE_DATA_DIR` | `./data` | 数据目录（任务/定时任务/工作空间） |
+| `CIRCLE_DATA_DIR` | `~/.circle/data` | 数据目录（任务/定时任务/工作空间/微信账户/日志） |
 | `CIRCLE_AGENT_DIR` | `~/.pi/agent` | pi 配置目录（模型/凭据） |
 | `CIRCLE_MODEL_PROVIDER` | `deepseek` | 模型 provider |
 | `CIRCLE_MODEL_ID` | `deepseek-v4-flash` | 模型 id |

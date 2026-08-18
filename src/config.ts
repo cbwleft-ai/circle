@@ -1,8 +1,6 @@
 import { mkdirSync } from "node:fs";
-import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
+import { homedir } from "node:os";
+import { resolve } from "node:path";
 
 export interface AppConfig {
   /** 数据目录（任务存储、定时任务存储、工作空间） */
@@ -65,7 +63,9 @@ const envBool = (key: string, fallback: boolean): boolean => {
 };
 
 export function loadConfig(): AppConfig {
-  const dataDir = env("CIRCLE_DATA_DIR") ?? resolve(__dirname, "../../data");
+  // 默认数据目录：~/.circle/data（与 ~/.pi/agent 同级，辨识度高）；
+  // 可用 CIRCLE_DATA_DIR 覆盖（历史部署曾用 /home/<user>/data 等位置）。
+  const dataDir = env("CIRCLE_DATA_DIR") ?? resolve(homedir(), ".circle", "data");
   mkdirSync(dataDir, { recursive: true });
   mkdirSync(resolve(dataDir, "workspaces"), { recursive: true });
   mkdirSync(resolve(dataDir, "sessions"), { recursive: true });
