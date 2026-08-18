@@ -104,18 +104,6 @@ interface WeixinMessageItem {
   type?: number;
   text_item?: { text?: string };
   voice_item?: { text?: string };
-  /** 引用消息（quoted message）载荷，字段与腾讯官方 openclaw-weixin 对齐 */
-  ref_msg?: RefMessage;
-}
-
-/**
- * 引用消息载荷：
- * - title: 被引用消息的摘要/标题（引用卡片、链接或仅摘要时提供）；
- * - message_item: 被引用消息的内容项（文本/媒体）。
- */
-interface RefMessage {
-  title?: string;
-  message_item?: WeixinMessageItem;
 }
 
 interface WeixinMessage {
@@ -492,23 +480,9 @@ function extractText(msg: WeixinMessage): string {
   for (const item of items) {
     if (item.type === 1 && item.text_item?.text != null) {
       let text = String(item.text_item.text);
-      const ref = item.ref_msg;
-      if (ref) {
-        // 拼装引用上下文：摘要(title) + 被引用文本(message_item.text)
-        // （issue #25：此前仅取 message_item.text，丢失 title 摘要，
-        //   引用卡片/仅摘要消息时 Coordinator 完全看不到引用内容）
-        const parts: string[] = [];
-        if (ref.title?.trim()) parts.push(ref.title.trim());
-        if (ref.message_item?.type === 1 && ref.message_item.text_item?.text) {
-          parts.push(ref.message_item.text_item.text);
-        } else if (ref.message_item) {
-          // 引用的是媒体消息：给出类型提示，避免上下文完全丢失
-          const mediaHint = mediaTypeHint(ref.message_item.type);
-          if (mediaHint) parts.push(mediaHint);
-        }
-        if (parts.length) {
-          text = `[引用: ${parts.join(" | ")}]\n${text}`;
-        }
+      const ref = (item as { ref_msg?: { message_item?: WeixinMessageItem } }).ref_msg;
+      if (ref?.message_item?.type === 1 && ref.message_item.text_item?.text) {
+        text = `[引用: ${ref.message_item.text_item.text}]\n${text}`;
       }
       return text;
     }
@@ -522,22 +496,6 @@ function extractText(msg: WeixinMessage): string {
   if (hasImage) return "[收到图片消息]";
   if (hasFile) return "[收到文件消息]";
   return "";
-}
-
-/** 被引用媒体消息的类型提示（MessageItemType: 2 图片 / 3 语音 / 4 文件 / 5 视频） */
-function mediaTypeHint(type?: number): string | undefined {
-  switch (type) {
-    case 2:
-      return "[引用图片]";
-    case 3:
-      return "[引用语音]";
-    case 4:
-      return "[引用文件]";
-    case 5:
-      return "[引用视频]";
-    default:
-      return undefined;
-  }
 }
 
 function filterMarkdown(text: string): string {
