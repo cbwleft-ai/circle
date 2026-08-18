@@ -79,7 +79,6 @@ CIRCLE_LLM_TESTS=0 npm test   # 仅运行确定性用例（无需 API key）
 | 使用文档 | [docs/usage.md](docs/usage.md) |
 | 架构设计 | [docs/architecture.md](docs/architecture.md) |
 | 二次开发说明 | [docs/development.md](docs/development.md) |
-| 品牌 Logo | [assets/logo/](assets/logo/)（`circle-logo.svg` 主 Logo、`circle-logo-icon.png` 项目图标、`circle-logo-social-preview.png` 社交预览图） |
 
 ## 目录结构
 
