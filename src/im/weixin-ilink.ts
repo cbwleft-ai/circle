@@ -71,7 +71,7 @@ async function postJson(baseUrl: string, endpoint: string, body: unknown, token?
     const text = await res.text();
     if (!res.ok) throw new Error(`微信 API ${endpoint} HTTP ${res.status}: ${text.slice(0, 200)}`);
     try {
-      return JSON.parse(text);
+      return jsonParseSafe(text);
     } catch {
       return { raw: text };
     }
@@ -93,15 +93,34 @@ async function getJson(baseUrl: string, endpoint: string, timeoutMs = API_TIMEOU
     clearTimeout(timer);
     const text = await res.text();
     if (!res.ok) throw new Error(`微信 API ${endpoint} HTTP ${res.status}: ${text.slice(0, 200)}`);
-    return JSON.parse(text);
+    return jsonParseSafe(text);
   } catch (err) {
     clearTimeout(timer);
     throw err;
   }
 }
 
+/**
+ * 大整数安全 JSON 解析（issue #25 引用还原的配套修复）：
+ * 微信 message_id 为 19 位大整数，JSON.parse 直接解析会丢失精度
+ * （7495099801417603848 → 7495099801417604000），导致注册表 key 与引用 msg_id 对不上。
+ * 解析前先把超 2^53 的整数字面量改写成字符串，保证 id 精确匹配。
+ */
+export function jsonParseSafe(text: string): unknown {
+  const fixed = text.replace(/(?<=[:,\[])\s*(-?\d{16,})(?=\s*[,}\]])/g, (m) => {
+    const digits = m.trim();
+    if (Math.abs(Number(digits)) <= Number.MAX_SAFE_INTEGER) return m;
+    return m.replace(digits, `"${digits}"`);
+  });
+  return JSON.parse(fixed);
+}
+
 interface WeixinMessageItem {
   type?: number;
+  create_time_ms?: number;
+  is_completed?: boolean;
+  /** 消息 ID（顶层消息也有 message_id，item 级为 msg_id，引用时凭此还原内容） */
+  msg_id?: string;
   text_item?: { text?: string };
   voice_item?: { text?: string };
   /** 引用消息（quoted message）载荷，字段与腾讯官方 openclaw-weixin 对齐 */
@@ -120,7 +139,11 @@ interface RefMessage {
 
 interface WeixinMessage {
   from_user_id?: string;
+  to_user_id?: string;
   message_type?: number;
+  create_time_ms?: number;
+  message_id?: number;
+  client_id?: string;
   item_list?: WeixinMessageItem[];
   context_token?: string;
   [k: string]: unknown;
@@ -152,6 +175,20 @@ export class WeixinIlinkAdapter implements ImAdapter {
   private polling = false;
   private abort?: AbortController;
   private getUpdatesBuf = "";
+
+  /**
+   * 本地消息注册表：msg_id/message_id → 文本，用于还原引用消息内容（issue #25）。
+   * 真实 iLink 报文里引用（ref_msg.message_item）只回传被引用消息的 msg_id（type=0），
+   * 不附带内容；需要凭 id 在本地历史中查回文本。
+   */
+  private msgRegistry = new Map<string, { text: string; ts: number }>();
+  private registryLoaded = false;
+  /**
+   * 出站消息登记：client_id → 发送文本。
+   * 微信可能把 bot 自己发的消息回显到 getupdates（带 client_id），
+   * 此时可把发送文本关联到回显消息的 msg_id，供后续被引用时还原。
+   */
+  private pendingOutbound = new Map<string, string>();
 
   constructor(private readonly options: WeixinIlinkOptions = {}) {
     this.apiBaseUrl = options.baseUrl ?? WEIXIN_DEFAULT_BASE_URL;
@@ -351,28 +388,97 @@ export class WeixinIlinkAdapter implements ImAdapter {
   }
 
   private handleIncoming(msg: WeixinMessage): void {
+    // 先把所有消息（含 bot 自身 type=2）登记进注册表，供后续引用还原（issue #25）
+    this.recordMessage(msg);
+
     // 忽略自己发送的消息（BOT 类型）
     if (msg.message_type === 2) return;
     const fromUserId = msg.from_user_id;
     if (!fromUserId) return;
 
-    const text = extractText(msg);
-    if (!text) return;
+    // 调试：打印收到的原始报文结构（长字段截断、媒体密钥脱敏），
+    // 用于核对真实 iLink 载荷（issue #25 引用消息结构排查）
+    log.info("im:weixin", `收到消息 from=${fromUserId} message_type=${msg.message_type} items=${(msg.item_list ?? []).length}\n${redactPayload(msg)}`);
+
+    const text = extractText(msg, (msgId) => this.msgRegistry.get(msgId)?.text);
+    if (!text) {
+      log.warn("im:weixin", `消息无可提取文本，已丢弃 from=${fromUserId} items=${(msg.item_list ?? []).length}`);
+      return;
+    }
 
     this.handler?.({ chatId: `wx:${fromUserId}`, text });
+  }
+
+  // ============ 消息注册表（引用还原，issue #25） ============
+
+  private registryPath(): string {
+    return join(this.stateDir(), "msg-registry.json");
+  }
+
+  private loadRegistry(): void {
+    if (this.registryLoaded) return;
+    this.registryLoaded = true;
+    try {
+      const raw = readFileSync(this.registryPath(), "utf-8");
+      const data = JSON.parse(raw) as Array<{ id: string; text: string; ts: number }>;
+      for (const e of data) this.msgRegistry.set(e.id, { text: e.text, ts: e.ts });
+    } catch {
+      /* 无历史注册表时忽略 */
+    }
+  }
+
+  private saveRegistry(): void {
+    try {
+      const arr = [...this.msgRegistry.entries()]
+        .slice(-2000)
+        .map(([id, v]) => ({ id, text: v.text, ts: v.ts }));
+      writeFileSync(this.registryPath(), JSON.stringify(arr), "utf-8");
+    } catch (e) {
+      log.warn("im:weixin", `消息注册表保存失败: ${(e as Error).message}`);
+    }
+  }
+
+  /** 登记消息文本：顶层 message_id 与 item 级 msg_id 都记录（引用可能引用任一 id） */
+  private recordMessage(msg: WeixinMessage): void {
+    this.loadRegistry();
+    const msgTs = msg.create_time_ms ?? Date.now();
+    // 出站消息回显：client_id 命中 pendingOutbound → 用发送时的文本登记
+    let outboundText: string | undefined;
+    if (msg.client_id && this.pendingOutbound.has(msg.client_id)) {
+      outboundText = this.pendingOutbound.get(msg.client_id);
+      this.pendingOutbound.delete(msg.client_id);
+    }
+    if (msg.message_id) {
+      const text = outboundText ?? rawTextOf(msg);
+      if (text) this.msgRegistry.set(String(msg.message_id), { text, ts: msgTs });
+    }
+    for (const item of msg.item_list ?? []) {
+      if (!item.msg_id) continue;
+      const text = outboundText ?? item.text_item?.text ?? item.voice_item?.text ?? "";
+      if (text) this.msgRegistry.set(item.msg_id, { text, ts: item.create_time_ms ?? msgTs });
+    }
+    if (this.msgRegistry.size > 2200) this.saveRegistry();
   }
 
   async send(chatId: string, text: string): Promise<void> {
     if (!this.token) throw new Error("微信未登录");
     const toUserId = chatId.startsWith("wx:") ? chatId.slice(3) : chatId;
-    await postJson(
+    const clientId = `circle-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    // 登记出站文本，待微信回显（带 client_id）时关联到 msg_id（issue #25）
+    this.pendingOutbound.set(clientId, text);
+    if (this.pendingOutbound.size > 500) {
+      // 防泄漏：只保留最近 500 条待关联出站消息
+      const oldest = [...this.pendingOutbound.keys()].slice(0, this.pendingOutbound.size - 500);
+      for (const k of oldest) this.pendingOutbound.delete(k);
+    }
+    const resp = await postJson(
       this.apiBaseUrl,
       "ilink/bot/sendmessage",
       {
         msg: {
           from_user_id: "",
           to_user_id: toUserId,
-          client_id: `circle-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+          client_id: clientId,
           message_type: 2,
           message_state: 2,
           item_list: [{ type: 1, text_item: { text: filterMarkdown(text) } }],
@@ -381,6 +487,14 @@ export class WeixinIlinkAdapter implements ImAdapter {
       },
       this.token,
     );
+    log.info("im:weixin", `已发送消息 → ${toUserId}: ${text.slice(0, 120)}`);
+    // 平台若回传消息 id，直接登记（供该消息被引用时还原内容）
+    const sentId = resp?.message_id ?? resp?.msg?.message_id ?? resp?.msg_id;
+    if (sentId != null) {
+      this.loadRegistry();
+      this.msgRegistry.set(String(sentId), { text, ts: Date.now() });
+      this.pendingOutbound.delete(clientId);
+    }
   }
 
   /**
@@ -487,41 +601,99 @@ export class WeixinIlinkAdapter implements ImAdapter {
 // 消息文本提取 / markdown 清洗
 // ============================================================================
 
-function extractText(msg: WeixinMessage): string {
+function extractText(msg: WeixinMessage, lookupRef?: (msgId: string) => string | undefined): string {
   const items = msg.item_list ?? [];
+  const parts: string[] = [];
+  let hasImage = false;
+  let hasFile = false;
   for (const item of items) {
+    if (item.type === 2) hasImage = true;
+    if (item.type === 4) hasFile = true;
     if (item.type === 1 && item.text_item?.text != null) {
       let text = String(item.text_item.text);
       const ref = item.ref_msg;
       if (ref) {
         // 拼装引用上下文：摘要(title) + 被引用文本(message_item.text)
-        // （issue #25：此前仅取 message_item.text，丢失 title 摘要，
-        //   引用卡片/仅摘要消息时 Coordinator 完全看不到引用内容）
-        const parts: string[] = [];
-        if (ref.title?.trim()) parts.push(ref.title.trim());
-        if (ref.message_item?.type === 1 && ref.message_item.text_item?.text) {
-          parts.push(ref.message_item.text_item.text);
-        } else if (ref.message_item) {
-          // 引用的是媒体消息：给出类型提示，避免上下文完全丢失
-          const mediaHint = mediaTypeHint(ref.message_item.type);
-          if (mediaHint) parts.push(mediaHint);
+        // （issue #25）
+        const quoteParts: string[] = [];
+        if (ref.title?.trim()) quoteParts.push(ref.title.trim());
+        const refMsg = ref.message_item;
+        if (refMsg) {
+          if (refMsg.type === 1 && refMsg.text_item?.text) {
+            // 被引用内容直接带文本（部分平台/场景）
+            quoteParts.push(refMsg.text_item.text);
+          } else if (refMsg.type && mediaTypeHint(refMsg.type)) {
+            // 引用的是媒体消息：给出类型提示
+            quoteParts.push(mediaTypeHint(refMsg.type)!);
+          } else if (refMsg.msg_id) {
+            // 真实 iLink 场景：平台只回传被引用消息的 msg_id（type=0），不带内容
+            // 1) 优先从本地注册表还原内容
+            const cached = lookupRef?.(refMsg.msg_id);
+            if (cached) {
+              quoteParts.push(cached);
+            } else {
+              // 2) 兜底：至少让 Coordinator 知道存在引用及其时间，可结合任务记录关联
+              quoteParts.push(`[消息 ${refMsg.msg_id}，发送于 ${formatMsgTime(refMsg.create_time_ms)}]`);
+            }
+          }
         }
-        if (parts.length) {
-          text = `[引用: ${parts.join(" | ")}]\n${text}`;
+        if (quoteParts.length) {
+          text = `[引用: ${quoteParts.join(" | ")}]\n${text}`;
         }
       }
-      return text;
-    }
-    if (item.type === 3 && item.voice_item?.text) {
-      return item.voice_item.text;
+      parts.push(text);
+    } else if (item.type === 3 && item.voice_item?.text) {
+      // 语音转文字：语音消息自带 text 字段时直接使用文字内容
+      parts.push(item.voice_item.text);
     }
   }
+  // 合并所有文本/语音项（真实引用消息可能以多条 item 下发，
+  // 此前只取第一条会丢掉引用内容或用户指令，issue #25）
+  if (parts.length) return parts.join("\n");
   // 非文本消息给出占位描述
-  const hasImage = items.some((i) => i.type === 2);
-  const hasFile = items.some((i) => i.type === 4);
   if (hasImage) return "[收到图片消息]";
   if (hasFile) return "[收到文件消息]";
   return "";
+}
+
+/** 消息文本原始提取（不含引用前缀），供注册表登记 */
+function rawTextOf(msg: WeixinMessage): string {
+  for (const item of msg.item_list ?? []) {
+    if (item.type === 1 && item.text_item?.text != null) return String(item.text_item.text);
+    if (item.type === 3 && item.voice_item?.text) return item.voice_item.text;
+  }
+  return "";
+}
+
+/** 确定性时间格式：YYYY-MM-DD HH:mm（本地时区） */
+function formatMsgTime(ts?: number): string {
+  if (!ts) return "未知时间";
+  const d = new Date(ts);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+/**
+ * 入站报文脱敏打印：长字符串截断、媒体密钥打码，便于排查真实载荷结构。
+ */
+function redactPayload(msg: WeixinMessage): string {
+  const walk = (v: unknown, depth: number): unknown => {
+    if (depth > 8) return "[...]";
+    if (typeof v === "string") {
+      if (v.length > 200) return `${v.slice(0, 200)}…(${v.length} 字符)`;
+      return v;
+    }
+    if (Array.isArray(v)) return v.map((x) => walk(x, depth + 1));
+    if (v && typeof v === "object") {
+      const o: Record<string, unknown> = {};
+      for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+        o[k] = k === "aes_key" ? "[redacted]" : walk(val, depth + 1);
+      }
+      return o;
+    }
+    return v;
+  };
+  return JSON.stringify(walk(msg, 0));
 }
 
 /** 被引用媒体消息的类型提示（MessageItemType: 2 图片 / 3 语音 / 4 文件 / 5 视频） */

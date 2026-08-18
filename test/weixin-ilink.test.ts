@@ -15,7 +15,7 @@ import { mkdtempSync, rmSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runCase, poll, type TestResult } from "./helpers.js";
-import { WeixinIlinkAdapter } from "../src/im/weixin-ilink.js";
+import { WeixinIlinkAdapter, jsonParseSafe } from "../src/im/weixin-ilink.js";
 
 interface MockServer {
   server: Server;
@@ -24,6 +24,8 @@ interface MockServer {
   qrRequests: number;
   updatesQueue: unknown[];
   sentMessages: Array<{ to: string; text: string }>;
+  /** 发送消息时使用的 client_id（用于模拟微信回显出站消息） */
+  sentClientIds: string[];
   /** 发送的所有消息 item（含文件/图片） */
   sentItems: Array<{ to: string; type: number; item: unknown }>;
   /** getuploadurl 请求体 */
@@ -39,6 +41,7 @@ function createMockWeixinServer(): Promise<MockServer> {
     qrRequests: 0,
     updatesQueue: [],
     sentMessages: [],
+    sentClientIds: [],
     sentItems: [],
     uploadUrlRequests: [],
     cdnUploads: [],
@@ -97,6 +100,7 @@ function createMockWeixinServer(): Promise<MockServer> {
         const to = msg.to_user_id ?? "";
         const item = (msg.item_list ?? [])[0];
         state.sentMessages.push({ to, text: item?.text_item?.text ?? "" });
+        state.sentClientIds.push(String(msg.client_id ?? ""));
         state.sentItems.push({ to, type: item?.type ?? 0, item });
         send(200, { ret: 0 });
       });
@@ -468,6 +472,188 @@ export async function runWeixinIlinkTests(): Promise<TestResult[]> {
         t.assertEqual(texts[5], "[引用: [引用语音]]\n语音内容", "引用语音应有类型提示");
         t.assertEqual(texts[6], "[引用: [引用视频]]\n视频链接", "引用视频应有类型提示");
         t.assertEqual(texts[7], "[引用: 带图标题 | [引用图片]]\n标题下的图", "title+媒体应组合解析");
+        await adapter.stop();
+      } finally {
+        await mock.close();
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    }),
+  );
+
+  results.push(
+    await runCase("U-31", "微信官方通道", "多条 item 合并：引用内容以独立 item 下发时不丢用户指令（issue #25）", async (t) => {
+      const mock = await createMockWeixinServer();
+      const stateDir = mkdtempSync(join(tmpdir(), "circle-wx-quote-multi-"));
+      try {
+        const adapter = new WeixinIlinkAdapter({
+          baseUrl: mock.baseUrl,
+          botToken: "mock-bot-token-1",
+          stateDir,
+        });
+        const received: Array<{ chatId: string; text: string }> = [];
+        adapter.onMessage((m) => received.push(m));
+
+        // 真实引用消息可能以多条 item 下发：被引用内容 + 用户指令
+        const msgs = [
+          {
+            from_user_id: "wxuser-1",
+            message_type: 1,
+            item_list: [
+              { type: 1, text_item: { text: "被引用的历史消息内容" } },
+              { type: 1, text_item: { text: "看下这个产出物" } },
+            ],
+          },
+        ];
+        mock.updatesQueue.push({ ret: 0, get_updates_buf: "buf-quote-multi", msgs });
+
+        await adapter.start();
+        await poll(() => received.length >= 1, {
+          timeoutMs: 15_000,
+          msg: "应收到多 item 合并后的消息",
+        });
+
+        t.assertEqual(
+          received[0].text,
+          "被引用的历史消息内容\n看下这个产出物",
+          "多条文本 item 应合并，不丢失用户指令",
+        );
+        await adapter.stop();
+      } finally {
+        await mock.close();
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    }),
+  );
+
+  results.push(
+    await runCase("U-32", "微信官方通道", "真实 iLink 引用载荷：type=0 仅 msg_id，注册表还原 + 兜底占位 + 大整数 id 解析（issue #25）", async (t) => {
+      // 大整数安全解析：19 位 message_id 不能被精度丢失
+      const parsed = jsonParseSafe('{"message_id":7495099801417603848}') as { message_id: unknown };
+      t.assertEqual(parsed.message_id, "7495099801417603848", "超 2^53 的 message_id 应保持精确字符串");
+
+      const mock = await createMockWeixinServer();
+      const stateDir = mkdtempSync(join(tmpdir(), "circle-wx-ref-"));
+      try {
+        const adapter = new WeixinIlinkAdapter({
+          baseUrl: mock.baseUrl,
+          botToken: "mock-bot-token-1",
+          stateDir,
+        });
+        const received: Array<{ chatId: string; text: string }> = [];
+        adapter.onMessage((m) => received.push(m));
+
+        const msgs = [
+          // 1) 历史消息（稍后被引用）：顶层 message_id 与 item msg_id 都登记进注册表
+          {
+            message_id: "7495099801417603848",
+            from_user_id: "wxuser-1",
+            message_type: 1,
+            create_time_ms: 1786971042000,
+            item_list: [{ type: 1, msg_id: "v1:hist1", create_time_ms: 1786971042000, text_item: { text: "这是我的产出物报告" } }],
+          },
+          // 2) 真实引用载荷：ref_msg.message_item.type=0、仅 msg_id（引用上面那条）
+          {
+            from_user_id: "wxuser-1",
+            message_type: 1,
+            item_list: [
+              {
+                type: 1,
+                msg_id: "v1:cur1",
+                text_item: { text: "看下这个产出物" },
+                ref_msg: { message_item: { type: 0, msg_id: "7495099801417603848", create_time_ms: 1786971042000 } },
+              },
+            ],
+          },
+          // 3) 引用未知 id（注册表查不到）→ 兜底占位，Coordinator 至少知道存在引用
+          {
+            from_user_id: "wxuser-1",
+            message_type: 1,
+            item_list: [
+              {
+                type: 1,
+                msg_id: "v1:cur2",
+                text_item: { text: "这条是什么" },
+                ref_msg: { message_item: { type: 0, msg_id: "999888777666555444", create_time_ms: 1786971042000 } },
+              },
+            ],
+          },
+        ];
+        mock.updatesQueue.push({ ret: 0, get_updates_buf: "buf-ref", msgs });
+
+        await adapter.start();
+        await poll(() => received.length >= 3, {
+          timeoutMs: 15_000,
+          msg: "应收到 3 条消息",
+        });
+
+        t.assertEqual(received[1].text, "[引用: 这是我的产出物报告]\n看下这个产出物", "注册表命中：应还原被引用内容");
+        t.assert(
+          /^\[引用: \[消息 999888777666555444，发送于 \d{4}-\d{2}-\d{2} \d{2}:\d{2}\]\]\n这条是什么$/.test(
+            received[2].text,
+          ),
+          `注册表未命中：应输出 id+时间兜底占位，实际: ${received[2].text}`,
+        );
+        await adapter.stop();
+      } finally {
+        await mock.close();
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    }),
+  );
+
+  results.push(
+    await runCase("U-33", "微信官方通道", "出站消息回显关联：bot 回复被用户引用时可按 client_id 还原内容（issue #25）", async (t) => {
+      const mock = await createMockWeixinServer();
+      const stateDir = mkdtempSync(join(tmpdir(), "circle-wx-out-"));
+      try {
+        const adapter = new WeixinIlinkAdapter({
+          baseUrl: mock.baseUrl,
+          botToken: "mock-bot-token-1",
+          stateDir,
+        });
+        const received: Array<{ chatId: string; text: string }> = [];
+        adapter.onMessage((m) => received.push(m));
+        await adapter.start();
+
+        // bot 发送回复 → mock 记录 client_id（sendmessage 响应不带 message_id）
+        await adapter.send("wx:wxuser-1", "这是 bot 的回复内容");
+        const clientId = mock.sentClientIds[0] ?? "";
+        t.assert(clientId.startsWith("circle-"), "应生成 circle- 前缀的 client_id");
+
+        // 微信将 bot 消息回显（message_type=2，带 client_id 与 msg_id）→ 注册表关联发送文本
+        // 随后用户引用该 bot 消息 → 应还原出 bot 回复内容
+        mock.updatesQueue.push({
+          ret: 0,
+          get_updates_buf: "buf-out",
+          msgs: [
+            {
+              from_user_id: "aebef8716ba6@im.bot",
+              to_user_id: "wxuser-1",
+              client_id: clientId,
+              message_type: 2,
+              create_time_ms: 1786971042000,
+              item_list: [{ type: 1, msg_id: "7495099801417603848", text_item: { text: "" } }],
+            },
+            {
+              from_user_id: "wxuser-1",
+              message_type: 1,
+              item_list: [
+                {
+                  type: 1,
+                  msg_id: "v1:cur3",
+                  text_item: { text: "再发一遍" },
+                  ref_msg: { message_item: { type: 0, msg_id: "7495099801417603848", create_time_ms: 1786971042000 } },
+                },
+              ],
+            },
+          ],
+        });
+
+        await poll(() => received.length >= 1, {
+          timeoutMs: 15_000,
+          msg: "应收到引用 bot 回复的消息",
+        });
+        t.assertEqual(received[0].text, "[引用: 这是 bot 的回复内容]\n再发一遍", "出站回显关联：应还原 bot 回复内容");
         await adapter.stop();
       } finally {
         await mock.close();
