@@ -635,12 +635,13 @@ function extractText(msg: WeixinMessage, lookupRef?: (msgId: string) => string |
               quoteParts.push(cached);
             } else {
               // 2) 兜底：至少让 Coordinator 知道存在引用及其时间，可结合任务记录关联
-              quoteParts.push(`[消息 ${refMsg.msg_id}，发送于 ${formatMsgTime(refMsg.create_time_ms)}]`);
+              quoteParts.push(`[消息 ${refMsg.msg_id}，发送于 ${formatMsgTime(refMsg.create_time_ms)}（内容不可见）]`);
             }
           }
         }
         if (quoteParts.length) {
-          text = `[引用: ${quoteParts.join(" | ")}]\n${text}`;
+          // 用直白自然语言而非 [引用: ...] 标记：部分 LLM 会把方括号标记误认为"不可见引用"而忽略内容
+          text = `被引用内容：${quoteParts.join(" | ")}\n用户消息：${text}`;
         }
       }
       parts.push(text);

@@ -465,13 +465,13 @@ export async function runWeixinIlinkTests(): Promise<TestResult[]> {
 
         const texts = received.map((m) => m.text);
         t.assertEqual(texts[0], "普通消息文本", "普通文本应原样透传（无引用前缀）");
-        t.assertEqual(texts[1], "[引用: 文章标题 | 被引用的文本]\n回复内容", "引用文本+title 应完整解析");
-        t.assertEqual(texts[2], "[引用: 仅摘要标题]\n看到了吗", "仅 title 摘要不应丢失（issue #25 根因）");
-        t.assertEqual(texts[3], "[引用: [引用图片]]\n这是什么图", "引用图片应有类型提示");
-        t.assertEqual(texts[4], "[引用: [引用文件]]\n文件呢", "引用文件应有类型提示");
-        t.assertEqual(texts[5], "[引用: [引用语音]]\n语音内容", "引用语音应有类型提示");
-        t.assertEqual(texts[6], "[引用: [引用视频]]\n视频链接", "引用视频应有类型提示");
-        t.assertEqual(texts[7], "[引用: 带图标题 | [引用图片]]\n标题下的图", "title+媒体应组合解析");
+        t.assertEqual(texts[1], "被引用内容：文章标题 | 被引用的文本\n用户消息：回复内容", "引用文本+title 应完整解析");
+        t.assertEqual(texts[2], "被引用内容：仅摘要标题\n用户消息：看到了吗", "仅 title 摘要不应丢失（issue #25 根因）");
+        t.assertEqual(texts[3], "被引用内容：[引用图片]\n用户消息：这是什么图", "引用图片应有类型提示");
+        t.assertEqual(texts[4], "被引用内容：[引用文件]\n用户消息：文件呢", "引用文件应有类型提示");
+        t.assertEqual(texts[5], "被引用内容：[引用语音]\n用户消息：语音内容", "引用语音应有类型提示");
+        t.assertEqual(texts[6], "被引用内容：[引用视频]\n用户消息：视频链接", "引用视频应有类型提示");
+        t.assertEqual(texts[7], "被引用内容：带图标题 | [引用图片]\n用户消息：标题下的图", "title+媒体应组合解析");
         await adapter.stop();
       } finally {
         await mock.close();
@@ -586,9 +586,9 @@ export async function runWeixinIlinkTests(): Promise<TestResult[]> {
           msg: "应收到 3 条消息",
         });
 
-        t.assertEqual(received[1].text, "[引用: 这是我的产出物报告]\n看下这个产出物", "注册表命中：应还原被引用内容");
+        t.assertEqual(received[1].text, "被引用内容：这是我的产出物报告\n用户消息：看下这个产出物", "注册表命中：应还原被引用内容");
         t.assert(
-          /^\[引用: \[消息 999888777666555444，发送于 \d{4}-\d{2}-\d{2} \d{2}:\d{2}\]\]\n这条是什么$/.test(
+          /^被引用内容：\[消息 999888777666555444，发送于 \d{4}-\d{2}-\d{2} \d{2}:\d{2}（内容不可见）\]\n用户消息：这条是什么$/.test(
             received[2].text,
           ),
           `注册表未命中：应输出 id+时间兜底占位，实际: ${received[2].text}`,
@@ -653,7 +653,7 @@ export async function runWeixinIlinkTests(): Promise<TestResult[]> {
           timeoutMs: 15_000,
           msg: "应收到引用 bot 回复的消息",
         });
-        t.assertEqual(received[0].text, "[引用: 这是 bot 的回复内容]\n再发一遍", "出站回显关联：应还原 bot 回复内容");
+        t.assertEqual(received[0].text, "被引用内容：这是 bot 的回复内容\n用户消息：再发一遍", "出站回显关联：应还原 bot 回复内容");
         await adapter.stop();
       } finally {
         await mock.close();
