@@ -9,7 +9,7 @@
  */
 import { join } from "node:path";
 import { defaultWorkers, loadConfig } from "./config.js";
-import { log } from "./core/logger.js";
+import { log, setLogFile } from "./core/logger.js";
 import { ConsoleAdapter } from "./im/console.js";
 import { HttpAdapter } from "./im/http.js";
 import { WechatAdapter } from "./im/wechat.js";
@@ -18,6 +18,8 @@ import { AgentTeam } from "./team/agent-team.js";
 
 async function main(): Promise<void> {
   const config = loadConfig();
+  // 日志同时落盘到数据目录（data/logs/circle.log，按天轮转），与 stdout 双写
+  setLogFile(join(config.dataDir, "logs", "circle.log"));
   log.info("bootstrap", `Circle 启动中（IM: ${config.imAdapter}, 模型: ${config.modelProvider}/${config.modelId}）`);
 
   // 选择 IM 适配器
