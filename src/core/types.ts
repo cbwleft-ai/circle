@@ -14,6 +14,28 @@ export type TaskStatus =
 /** 任务类型：短程（<=10s 预期） / 长程（>10s 预期） */
 export type TaskPriority = "short" | "long";
 
+/** LLM 调用用量与费用（token 与美元计价，来自 pi AgentSession 的 usage 上报） */
+export interface TaskUsage {
+  /** 模型标识，如 deepseek/deepseek-v4-flash */
+  model: string;
+  /** LLM 调用次数 */
+  calls: number;
+  /** 输入 token */
+  input: number;
+  /** 输出 token */
+  output: number;
+  /** 缓存命中读取 token */
+  cacheRead: number;
+  /** 缓存写入 token */
+  cacheWrite: number;
+  /** 推理 token（属于 output 的子集，提供方不支持时为 0） */
+  reasoning: number;
+  /** token 总量（input+output+cacheRead+cacheWrite） */
+  totalTokens: number;
+  /** 总费用（美元） */
+  cost: number;
+}
+
 export interface Task {
   /** 任务编号，如 T-20250813-0001 */
   id: string;
@@ -40,6 +62,8 @@ export interface Task {
   result?: string;
   /** 错误信息 */
   error?: string;
+  /** Worker 执行该任务产生的 LLM 用量与费用（无记录时为 undefined） */
+  usage?: TaskUsage;
 }
 
 /** 定时任务 */
