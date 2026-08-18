@@ -457,7 +457,8 @@ export class WeixinIlinkAdapter implements ImAdapter {
       const text = outboundText ?? item.text_item?.text ?? item.voice_item?.text ?? "";
       if (text) this.msgRegistry.set(item.msg_id, { text, ts: item.create_time_ms ?? msgTs });
     }
-    if (this.msgRegistry.size > 2200) this.saveRegistry();
+    // 每次记录后落盘：注册表持久化，重启不丢（容量上限在 saveRegistry 内裁剪）
+    this.saveRegistry();
   }
 
   async send(chatId: string, text: string): Promise<void> {

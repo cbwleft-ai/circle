@@ -158,6 +158,7 @@ export class TaskStore {
     const tasks = this.list(filter);
     if (tasks.length === 0) return "暂无任务。";
     const lines = tasks.map((t) => {
+      const created = t.createdAt ? new Date(t.createdAt).toLocaleString("zh-CN") : "-";
       const done = t.completedAt ? new Date(t.completedAt).toLocaleString("zh-CN") : "-";
       const statusIcon: Record<TaskStatus, string> = {
         received: "🕐",
@@ -167,7 +168,7 @@ export class TaskStore {
         failed: "❌",
         rejected: "🚫",
       };
-      return `${statusIcon[t.status]} ${t.id} [${t.priority}] ${t.title}（Worker: ${t.workerName}, 状态: ${t.status}, 完成: ${done}）`;
+      return `${statusIcon[t.status]} ${t.id} [${t.priority}] ${t.title}（Worker: ${t.workerName}, 状态: ${t.status}, 创建: ${created}, 完成: ${done}）`;
     });
     return lines.join("\n");
   }
