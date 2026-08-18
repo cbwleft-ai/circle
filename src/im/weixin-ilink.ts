@@ -406,6 +406,7 @@ export class WeixinIlinkAdapter implements ImAdapter {
       return;
     }
 
+    log.info("im:weixin", `转发给团队 → ${fromUserId}: ${text.slice(0, 300)}`);
     this.handler?.({ chatId: `wx:${fromUserId}`, text });
   }
 
