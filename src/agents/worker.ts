@@ -23,7 +23,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { AppConfig } from "../config.js";
 import { log } from "../core/logger.js";
-import { addUsage, emptyUsage, usageFromAgentMessages } from "../core/usage.js";
+import { addUsage, emptyUsage, formatUsage, usageFromAgentMessages } from "../core/usage.js";
 import type { Task, TaskUsage, WorkerConfig } from "../core/types.js";
 
 const SessionManagerShim = {
@@ -69,9 +69,8 @@ export class WorkerAgent {
       const { text: result, usage } = await this.execute(task, workspaceDir);
       log.info(
         "worker",
-        `[${task.id}] 执行完成，耗时 ${((Date.now() - started) / 1000).toFixed(1)}s`,
+        `[${task.id}] 执行完成，耗时 ${((Date.now() - started) / 1000).toFixed(1)}s，用量 ${formatUsage(usage)}`,
       );
-      log.info("worker", `[${task.id}] 用量: ${JSON.stringify(usage)}`);
       return { result, usage };
     } finally {
       this.running--;

@@ -78,7 +78,9 @@ function ts(): string {
 }
 
 function emit(level: LogLevel, tag: string, msg: string) {
-  const line = `[${ts()}] [${level.toUpperCase()}] [${tag}] ${msg}`;
+  // 强制单行：消息中的换行转义为字面 \n，避免日志被多行消息打断
+  const singleLine = msg.replace(/\r?\n/g, "\\n");
+  const line = `[${ts()}] [${level.toUpperCase()}] [${tag}] ${singleLine}`;
   logBuffer.push(line);
   if (LEVEL_ORDER[level] < LEVEL_ORDER[minLevel]) return;
   writeFileLine(line);
