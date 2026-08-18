@@ -398,7 +398,7 @@ export class WeixinIlinkAdapter implements ImAdapter {
 
     // 调试：打印收到的原始报文结构（长字段截断、媒体密钥脱敏），
     // 用于核对真实 iLink 载荷（issue #25 引用消息结构排查）
-    log.info("im:weixin", `收到消息 from=${fromUserId} message_type=${msg.message_type} items=${(msg.item_list ?? []).length}\n${redactPayload(msg)}`);
+    log.debug("im:weixin", `收到消息 from=${fromUserId} message_type=${msg.message_type} items=${(msg.item_list ?? []).length}\n${redactPayload(msg)}`);
 
     const text = extractText(msg, (msgId) => this.msgRegistry.get(msgId)?.text);
     if (!text) {
