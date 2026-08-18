@@ -4,7 +4,8 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { log } from "./logger.js";
-import type { Task, TaskStatus } from "./types.js";
+import { formatCost } from "./usage.js";
+import type { Task, TaskStatus, TaskUsage } from "./types.js";
 
 export class TaskStore {
   private tasks: Task[] = [];
@@ -86,11 +87,12 @@ export class TaskStore {
     this.update(id, { status: "running", startedAt: Date.now() });
   }
 
-  markCompleted(id: string, result: string): void {
+  markCompleted(id: string, result: string, usage?: TaskUsage): void {
     this.update(id, {
       status: "completed",
       result,
       completedAt: Date.now(),
+      ...(usage ? { usage } : {}),
     });
   }
 
@@ -168,7 +170,8 @@ export class TaskStore {
         failed: "❌",
         rejected: "🚫",
       };
-      return `${statusIcon[t.status]} ${t.id} [${t.priority}] ${t.title}（Worker: ${t.workerName}, 状态: ${t.status}, 创建: ${created}, 完成: ${done}）`;
+      const cost = t.usage ? `，费用 ${formatCost(t.usage.cost)}` : "";
+      return `${statusIcon[t.status]} ${t.id} [${t.priority}] ${t.title}（Worker: ${t.workerName}, 状态: ${t.status}, 创建: ${created}, 完成: ${done}${cost}）`;
     });
     return lines.join("\n");
   }

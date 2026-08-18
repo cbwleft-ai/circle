@@ -18,6 +18,7 @@ import { log } from "../core/logger.js";
 import { assessSafety, REFUSAL_DESTRUCTIVE, REFUSAL_SENSITIVE, WARNING_CONFIG_STRUCTURE } from "../core/safety.js";
 import { ScheduleStore } from "../core/schedule-store.js";
 import { TaskStore } from "../core/task-store.js";
+import { UsageStore } from "../core/usage.js";
 import { formatBytes, summarizeText } from "../core/text.js";
 import type {
   ChatMessage,
@@ -49,6 +50,7 @@ export class AgentTeam implements TeamGateway {
   readonly config: AppConfig;
   readonly taskStore: TaskStore;
   readonly scheduleStore: ScheduleStore;
+  readonly usageStore: UsageStore;
   readonly workspace: WorkspaceManager;
   readonly coordinator: CoordinatorAgent;
   readonly scheduler: SchedulerAgent;
@@ -71,6 +73,7 @@ export class AgentTeam implements TeamGateway {
     this.modelRuntime = opts.modelRuntime;
     this.taskStore = new TaskStore(this.config.dataDir);
     this.scheduleStore = new ScheduleStore(this.config.dataDir);
+    this.usageStore = new UsageStore(this.config.dataDir);
     this.workspace = new WorkspaceManager(`${this.config.dataDir}/workspaces`, this.config.agentDir);
 
     for (const w of opts.workers) {
@@ -300,8 +303,9 @@ export class AgentTeam implements TeamGateway {
   ): Promise<string> {
     this.taskStore.markRunning(task.id);
     try {
-      const result = await worker.runTask(task, workspace);
-      this.taskStore.markCompleted(task.id, result);
+      const { result, usage } = await worker.runTask(task, workspace);
+      this.taskStore.markCompleted(task.id, result, usage);
+      this.usageStore.recordTask(task.id, usage);
       log.info("team", `任务 ${task.id} 已完成`);
       // 归档任务工作空间为产出物目录（tasks/<taskId> → outputs/<taskId>），持久保留
       let report = result;

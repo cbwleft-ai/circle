@@ -23,7 +23,8 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { AppConfig } from "../config.js";
 import { log } from "../core/logger.js";
-import type { Task, WorkerConfig } from "../core/types.js";
+import { addUsage, emptyUsage, usageFromAgentMessages } from "../core/usage.js";
+import type { Task, TaskUsage, WorkerConfig } from "../core/types.js";
 
 const SessionManagerShim = {
   inMemory: () => SessionManager.inMemory(),
@@ -58,24 +59,26 @@ export class WorkerAgent {
    * 注意：本方法返回的 Promise 在任务完成后 resolve；长程任务的「任务已收到」
    * 由团队层在调用本方法后立即下发，无需等待本 Promise。
    * workspaceDir 为任务专属工作空间（会话 cwd），任务之间完全隔离。
+   * 返回 Worker 的最终汇报文本与本次任务产生的 LLM 用量/费用。
    */
-  async runTask(task: Task, workspaceDir: string): Promise<string> {
+  async runTask(task: Task, workspaceDir: string): Promise<{ result: string; usage: TaskUsage }> {
     this.running++;
     const started = Date.now();
     try {
       log.info("worker", `[${task.id}] 开始执行（Worker: ${this.name}, 长程: ${task.priority === "long"}）`);
-      const result = await this.execute(task, workspaceDir);
+      const { text: result, usage } = await this.execute(task, workspaceDir);
       log.info(
         "worker",
         `[${task.id}] 执行完成，耗时 ${((Date.now() - started) / 1000).toFixed(1)}s`,
       );
-      return result;
+      log.info("worker", `[${task.id}] 用量: ${JSON.stringify(usage)}`);
+      return { result, usage };
     } finally {
       this.running--;
     }
   }
 
-  private async execute(task: Task, workspaceDir: string): Promise<string> {
+  private async execute(task: Task, workspaceDir: string): Promise<{ text: string; usage: TaskUsage }> {
     log.info("worker", `[${task.id}] 会话 cwd=${workspaceDir}（Worker 持久目录=${this.config.cwd}）`);
     const loader = new DefaultResourceLoader({
       cwd: this.config.cwd,
@@ -109,8 +112,11 @@ export class WorkerAgent {
     });
 
     const chunks: string[] = [];
+    const usage = emptyUsage(`${this.appConfig.modelProvider}/${this.appConfig.modelId}`);
     const unsubscribe = session.subscribe((event) => {
-      if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
+      if (event.type === "agent_end") {
+        addUsage(usage, usageFromAgentMessages(event.messages));
+      } else if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
         chunks.push(event.assistantMessageEvent.delta);
       }
     });
@@ -137,7 +143,7 @@ export class WorkerAgent {
     if (!text) {
       throw new Error("Worker 未返回任何结果");
     }
-    return text;
+    return { text, usage };
   }
 
   private buildSystemPrompt(task: Task, workspaceDir: string): string {
