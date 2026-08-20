@@ -796,6 +796,54 @@ export async function runUnitTests(): Promise<TestResult[]> {
     }),
   );
 
+  results.push(
+    await runCase("U-16b", "Scheduler", "长任务期间并发 tick 不重复触发（回归：S-MT1CIX4S-001 竞态）", async (t) => {
+      const dir = mkdtempSync(join(tmpdir(), "circle-unit-sched-race-"));
+      try {
+        const { SchedulerAgent } = await import("../src/agents/scheduler.js");
+        const store = new ScheduleStore(dir);
+        let fired = 0;
+        // 模拟 Worker 长任务：runScheduled 阻塞 200ms（真实场景为数十秒）
+        const runScheduled = async () => {
+          fired++;
+          await new Promise((r) => setTimeout(r, 200));
+          return { taskId: "T-race" };
+        };
+        const sched = new SchedulerAgent(
+          store,
+          { schedulerTickMs: 1000, cleanupAfterDays: 30, cleanupCron: "0 3 * * *" } as never,
+          {
+            runScheduled,
+            runDailyCleanup: async () => ({ removedTasks: 0, removedWorkspaces: 0 }),
+          },
+        );
+        const s = sched.create({ name: "竞态回归", cron: "0 10 * * *", description: "d", workerName: "dev" });
+        // 把下次触发点放到 1 分钟前，使第一次 tick 立即命中
+        const dueAt = Date.now() - 60_000;
+        store.update(s.id, { nextRunAt: dueAt, lastRunAt: dueAt - 60_000 });
+        // 并发 3 个 tick（模拟 setInterval 在上一个 tick await 期间重叠）
+        const ticks = await Promise.all([sched.tick(), sched.tick(), sched.tick()]);
+        await ticks;
+        // 给最后一个仍在 await 的 fire 留出完成时间
+        await new Promise((r) => setTimeout(r, 300));
+        t.assert(fired === 1, `长任务执行期间并发 tick 只应触发 1 次，实际 ${fired} 次`);
+        const after = store.get(s.id)!;
+        t.assert(after.lastRunAt !== undefined, "应已记录 lastRunAt");
+        t.assert(
+          after.nextRunAt !== undefined && after.nextRunAt > Date.now() - 60_000,
+          "nextRunAt 应在占坑时即被推后，不再指向过去",
+        );
+        t.assert(
+          after.taskIds.filter((id) => id === "T-race").length <= 1,
+          "taskIds 不应重复记录同一 taskId",
+        );
+        sched.stop();
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }),
+  );
+
   // ---------- IM 测试适配器 ----------
   results.push(
     await runCase("U-17", "IM 适配器", "TestAdapter 注入与等待", async (t) => {

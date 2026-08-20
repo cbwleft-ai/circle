@@ -23,6 +23,8 @@ export interface SchedulerDeps {
 export class SchedulerAgent {
   private timer?: ReturnType<typeof setInterval>;
   private lastCleanupCheck: Date = new Date();
+  /** 正在执行中的定时任务 id（in-flight 锁）：tick 与 fire 并发时防止同一任务重复触发 */
+  private readonly inFlight = new Set<string>();
 
   constructor(
     private readonly store: ScheduleStore,
@@ -55,6 +57,8 @@ export class SchedulerAgent {
   async tick(): Promise<void> {
     const now = new Date();
     for (const s of this.store.list(true)) {
+      // in-flight 锁：已有一次触发在执行中（Worker 可能跑很久），本轮直接跳过，不再重复下发
+      if (this.inFlight.has(s.id)) continue;
       const nextAt = s.nextRunAt;
       // 到期（nextRunAt <= now）且未被本次触发过（> lastRunAt）：双重防重
       if (nextAt !== undefined && nextAt <= now.getTime() && nextAt > (s.lastRunAt ?? 0)) {
@@ -66,17 +70,30 @@ export class SchedulerAgent {
 
   /** 立即触发某个定时任务（供测试与手动触发） */
   async fire(schedule: ScheduledTask): Promise<void> {
+    if (this.inFlight.has(schedule.id)) {
+      log.warn("scheduler", `定时任务 ${schedule.id} 已在执行中，跳过重复触发`);
+      return;
+    }
+    this.inFlight.add(schedule.id);
     log.info("scheduler", `触发定时任务 ${schedule.id}「${schedule.name}」`);
-    const res = await this.deps.runScheduled(schedule);
-    // exclusive：从下一整分钟起算，nextRunAt 严格晚于本次触发，防止同一分钟重复触发
-    const next = nextRun(schedule.cron, new Date(), { exclusive: true });
-    this.store.update(schedule.id, {
-      lastRunAt: Date.now(),
-      nextRunAt: next?.getTime(),
-      taskIds: res.taskId ? [...schedule.taskIds, res.taskId] : schedule.taskIds,
-    });
-    if (res.error) {
-      log.error("scheduler", `定时任务 ${schedule.id} 执行失败: ${res.error}`);
+    try {
+      // 先占坑再执行：在派发 Worker 之前立刻写回 lastRunAt/nextRunAt。
+      // 此前记账在 await runScheduled（Worker 可能执行数分钟）之后，
+      // 导致并发的 tick 一直读到旧状态（nextRunAt 仍 <= now、lastRunAt 为空）而反复触发。
+      // exclusive：从下一整分钟起算，nextRunAt 严格晚于本次触发，防止同一分钟重复触发。
+      const next = nextRun(schedule.cron, new Date(), { exclusive: true });
+      this.store.update(schedule.id, {
+        lastRunAt: Date.now(),
+        nextRunAt: next?.getTime(),
+      });
+      const res = await this.deps.runScheduled(schedule);
+      // 任务记录已由 runScheduled 内部的 addTaskRecord 写入（同一 store 实例），
+      // 这里不再基于旧数组展开 taskIds——既避免并发覆盖，也避免重复记录同一 taskId。
+      if (res.error) {
+        log.error("scheduler", `定时任务 ${schedule.id} 执行失败: ${res.error}`);
+      }
+    } finally {
+      this.inFlight.delete(schedule.id);
     }
   }
 
