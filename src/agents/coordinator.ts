@@ -24,6 +24,7 @@ import {
 import { Type } from "typebox";
 import type { AppConfig } from "../config.js";
 import { log } from "../core/logger.js";
+import { systemTimeBlock } from "../core/time.js";
 import type { TeamGateway } from "../team/gateway.js";
 
 export class CoordinatorAgent {
@@ -79,6 +80,11 @@ export class CoordinatorAgent {
       .join("\n");
     return `你是 Circle 系统中的 Coordinator，是使用者唯一对话的 Agent。
 你只负责沟通与协调，绝不亲自执行具体任务；执行一律派发给 Worker 或 Scheduler。
+
+## 时间（重要）
+- 每轮输入（用户消息/系统通知）开头会注入当前时刻：（系统时间：YYYY-MM-DD HH:mm，周X）；
+- 该时间以服务器本地时区为准，与定时任务 cron 的触发时钟一致；
+- 相对时间换算（"昨天""上周五""每天上午 10 点"等）一律以注入的系统时间为锚点，不要凭记忆猜测日期。
 
 ## 你的职责
 1. 响应用户对话，理解需求；
@@ -342,7 +348,7 @@ ${workers || "- （暂无 Worker）"}
       }
     });
     try {
-      await session.prompt(input);
+      await session.prompt(`${systemTimeBlock()}\n${input}`);
     } catch (e) {
       const err = (e as Error).message;
       log.warn("coordinator", `本轮回复异常: ${err}`);

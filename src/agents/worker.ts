@@ -23,6 +23,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { AppConfig } from "../config.js";
 import { log } from "../core/logger.js";
+import { systemTimeBlock } from "../core/time.js";
 import { addUsage, emptyUsage, formatUsage, usageFromAgentMessages } from "../core/usage.js";
 import type { Task, TaskUsage, WorkerConfig } from "../core/types.js";
 
@@ -127,7 +128,7 @@ export class WorkerAgent {
 
     try {
       await session.prompt(
-        `请开始执行任务 ${task.id}「${task.title}」。\n执行指令：\n${task.description}`,
+        `${systemTimeBlock()}\n请开始执行任务 ${task.id}「${task.title}」。\n执行指令：\n${task.description}`,
       );
     } catch (e) {
       log.error("worker", `[${task.id}] 执行异常: ${(e as Error).message}`);
@@ -168,6 +169,10 @@ ${this.config.description}
 ## 任务
 - 任务编号：${task.id}（${task.priority === "long" ? "长程任务" : "短程任务"}）
 - 标题：${task.title}
+
+## 时间
+- 任务开始时会在指令开头注入当前时刻：（系统时间：YYYY-MM-DD HH:mm，周X）；
+- 该时间以服务器本地时区为准（与定时任务 cron 一致）；涉及相对时间/日期计算以此为准。
 
 ## 执行要求
 1. 仔细理解执行指令，规划步骤后再动手；
