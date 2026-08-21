@@ -118,7 +118,9 @@ Coordinator：⚠️ 安全拦截：该请求涉及敏感信息（密钥/口令/
 ### 4.0 一键启动脚本（推荐）
 
 项目自带服务管理脚本 `scripts/circle.sh`，固化微信适配器与数据目录配置，
-通过 systemd 用户服务托管（脱离终端会话，重启终端/机器不影响运行）：
+通过 nohup 后台运行 + flock 单实例锁托管（**不依赖 systemd**，兼容不支持
+systemctl 用户服务的目标环境；同一数据目录同时最多一个 Circle 实例，
+重复 `start` 会被单实例锁拒绝）：
 
 ```bash
 ./scripts/circle.sh start      # 启动（IM=weixin，数据目录 ~/.circle/data）
@@ -129,8 +131,9 @@ Coordinator：⚠️ 安全拦截：该请求涉及敏感信息（密钥/口令/
 ./scripts/circle.sh log-file   # 打印数据目录日志文件路径
 ```
 
-日志统一写入 `~/.circle/data/logs/circle.log`（按天轮转），stdout 进入 systemd journal。
-也可手动启动（等价于脚本 start 的行为）：
+日志统一写入 `~/.circle/data/logs/circle.log`（按天轮转，结构化主日志）；
+启动早期输出（nohup stdout/stderr）在 `logs/startup.log`。
+也可手动启动（等价于脚本 start 的行为，注意手动启动同样受单实例锁保护）：
 
 ```bash
 export CIRCLE_IM_ADAPTER=weixin
