@@ -1033,6 +1033,37 @@ export async function runUnitTests(): Promise<TestResult[]> {
     }),
   );
 
+  results.push(
+    await runCase("U-32", "多模态", "Worker 图片输入 loadTaskImages（读取/损坏跳过/默认 MIME）", async (t) => {
+      const dir = mkdtempSync(join(tmpdir(), "circle-unit-images-"));
+      try {
+        const { loadTaskImages } = await import("../src/agents/worker.js");
+        const png = join(dir, "a.png");
+        const jpg = join(dir, "b.jpg");
+        writeFileSync(png, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+        writeFileSync(jpg, Buffer.from("jpgbytes"));
+        // 正常 + 损坏（不存在）文件
+        const images = loadTaskImages([
+          { path: png, mimeType: "image/png" },
+          { path: jpg },
+          { path: join(dir, "missing.png") },
+        ]);
+        t.assert(images.length === 2, `应读取 2 张图片（损坏跳过），实际 ${images.length}`);
+        t.assert(images[0]!.type === "image" && images[0]!.mimeType === "image/png", "应保留 mimeType");
+        t.assert(images[0]!.data === Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).toString("base64"), "base64 内容应一致");
+        t.assert(images[1]!.mimeType === "image/jpeg", "未指定 mimeType 应默认 image/jpeg");
+        // 无附件
+        t.assert(loadTaskImages(undefined).length === 0, "无附件应返回空");
+        // 注入 fs 便于测试
+        const fakeFs = { readFileSync: () => Buffer.from("zzz") };
+        const viaFs = loadTaskImages([{ path: png }], fakeFs);
+        t.assert(viaFs.length === 1 && viaFs[0]!.data === "enp6", "应使用注入的 fs 读取");
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }),
+  );
+
   // ---------- IM 测试适配器 ----------
   results.push(
     await runCase("U-17", "IM 适配器", "TestAdapter 注入与等待", async (t) => {
