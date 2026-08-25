@@ -80,6 +80,9 @@ export class WorkerAgent {
 
   private async execute(task: Task, workspaceDir: string): Promise<{ text: string; usage: TaskUsage }> {
     log.info("worker", `[${task.id}] 会话 cwd=${workspaceDir}（Worker 持久目录=${this.config.cwd}）`);
+    // Worker 模型解析：WorkerConfig.modelProvider/modelId 优先，其次全局 worker 模型配置
+    const provider = this.config.modelProvider ?? this.appConfig.workerModelProvider;
+    const modelId = this.config.modelId ?? this.appConfig.workerModelId;
     const loader = new DefaultResourceLoader({
       cwd: this.config.cwd,
       agentDir: this.appConfig.agentDir,
@@ -94,9 +97,9 @@ export class WorkerAgent {
     });
     await loader.reload();
 
-    const model = this.modelRuntime.getModel(this.appConfig.modelProvider, this.appConfig.modelId);
+    const model = this.modelRuntime.getModel(provider, modelId);
     if (!model) {
-      throw new Error(`模型 ${this.appConfig.modelProvider}/${this.appConfig.modelId} 未找到`);
+      throw new Error(`模型 ${provider}/${modelId} 未找到`);
     }
 
     const { session } = await createAgentSession({
@@ -112,7 +115,7 @@ export class WorkerAgent {
     });
 
     const chunks: string[] = [];
-    const usage = emptyUsage(`${this.appConfig.modelProvider}/${this.appConfig.modelId}`);
+    const usage = emptyUsage(`${provider}/${modelId}`);
     const unsubscribe = session.subscribe((event) => {
       if (event.type === "agent_end") {
         addUsage(usage, usageFromAgentMessages(event.messages));
