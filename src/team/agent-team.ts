@@ -20,6 +20,7 @@ import { ScheduleStore } from "../core/schedule-store.js";
 import { TaskStore } from "../core/task-store.js";
 import { UsageStore } from "../core/usage.js";
 import { formatBytes, summarizeText } from "../core/text.js";
+import { AttachmentStore, buildMessageWithAttachments } from "../core/upload.js";
 import type {
   ChatMessage,
   DispatchResult,
@@ -27,6 +28,7 @@ import type {
   ScheduledTask,
   SendArtifactResult,
   Task,
+  TaskAttachment,
   WorkerConfig,
 } from "../core/types.js";
 import { WorkspaceManager } from "../core/workspace.js";
@@ -56,11 +58,18 @@ export class AgentTeam implements TeamGateway {
   readonly scheduler: SchedulerAgent;
   readonly workers = new Map<string, WorkerAgent>();
   readonly modelRuntime: ModelRuntime;
+  readonly attachmentStore: AttachmentStore;
 
   private turnCount = 0;
   private currentChatId = "console";
   /** 串行化所有 Coordinator 会话操作 */
   private coordinatorQueue: Promise<unknown> = Promise.resolve();
+  /**
+   * 各会话最近一次携带图片附件的落盘路径（issue #3）：
+   * 用户发图后，本轮及后续轮次的派发会确定性附加这些图片（替换式更新，不自动清除，
+   * 支持「请描述刚才那张图」这类不带图的追问）。
+   */
+  private readonly pendingAttachments = new Map<string, TaskAttachment[]>();
 
   /** 异步工厂：创建共享 ModelRuntime（读取 agentDir 的 auth.json / models.json） */
   static async create(opts: AgentTeamOptions): Promise<AgentTeam> {
@@ -75,6 +84,7 @@ export class AgentTeam implements TeamGateway {
     this.scheduleStore = new ScheduleStore(this.config.dataDir);
     this.usageStore = new UsageStore(this.config.dataDir);
     this.workspace = new WorkspaceManager(`${this.config.dataDir}/workspaces`, this.config.agentDir);
+    this.attachmentStore = new AttachmentStore(`${this.config.dataDir}/uploads`);
 
     for (const w of opts.workers) {
       const dir = this.workspace.workerDir(w.name);
@@ -157,6 +167,20 @@ export class AgentTeam implements TeamGateway {
     this.currentChatId = msg.chatId;
     this.turnCount++;
 
+    // 0) 多模态：保存图片/文件附件并把本地路径注入消息文本（issue #3）
+    let coordinatorText = msg.text;
+    if ((msg.attachments ?? []).length > 0) {
+      const saved = this.attachmentStore.save(msg.chatId, msg.attachments!);
+      if (saved.length > 0) {
+        this.pendingAttachments.set(
+          msg.chatId,
+          saved.map((s) => ({ path: s.localPath, mimeType: s.mimeType })),
+        );
+        coordinatorText = buildMessageWithAttachments(msg.text, saved);
+        log.info("team", `已保存 ${saved.length} 个附件（chat=${msg.chatId}）`);
+      }
+    }
+
     // 1) 安全评估（确定性拦截，不经过 LLM，保证不可绕过）
     const verdict = assessSafety(msg.text);
     if (verdict.risk === "destructive") {
@@ -175,8 +199,8 @@ export class AgentTeam implements TeamGateway {
       await this.outbox(msg.chatId, WARNING_CONFIG_STRUCTURE);
     }
 
-    // 2) Coordinator 处理
-    const reply = await this.enqueueCoordinator(() => this.coordinator.respond(msg.text));
+    // 2) Coordinator 处理（文本已富化：附件路径以【图片】标记注入）
+    const reply = await this.enqueueCoordinator(() => this.coordinator.respond(coordinatorText));
     if (reply) await this.outbox(msg.chatId, reply);
 
     // 3) 每 N 轮对话检查一次待办任务状态（长程任务跟进）
@@ -245,14 +269,18 @@ export class AgentTeam implements TeamGateway {
 
     // 长程判定：Coordinator 标记 或 启发式兜底
     const long = longFlag || LONG_TASK_PATTERNS.some((re) => re.test(description));
+    // 多模态：把该会话最近一次图片附件确定性附加到任务（不依赖 LLM 转述路径，issue #3）
+    const pending = this.pendingAttachments.get(this.currentChatId) ?? [];
+    const { description: finalDescription, attachments } = buildDispatchWithAttachments(description, pending);
     const task = this.taskStore.create({
       title,
-      description,
+      description: finalDescription,
       status: "received",
       priority: long ? "long" : "short",
       workerName,
       requestedBy: "user",
       requestChatId: this.currentChatId,
+      attachments,
     });
     log.info("team", `创建任务 ${task.id}「${title}」→ ${workerName}（${task.priority}）`);
 
@@ -497,6 +525,21 @@ export class AgentTeam implements TeamGateway {
     if (!s) throw new Error(`定时任务 ${id} 不存在`);
     await this.scheduler.fire(s);
   }
+}
+
+/**
+ * 派发时把会话待处理的图片附件确定性附加到任务（纯函数，便于测试）。
+ * 有附件时在描述尾部追加说明，并返回 attachments 供任务持久化。
+ */
+export function buildDispatchWithAttachments(
+  description: string,
+  pending: TaskAttachment[] | undefined,
+): { description: string; attachments: TaskAttachment[] | undefined } {
+  if (!pending || pending.length === 0) return { description, attachments: undefined };
+  return {
+    description: `${description}\n\n（用户附带了 ${pending.length} 张图片，已作为图片输入提供，请查看并处理）`,
+    attachments: pending,
+  };
 }
 
 /**

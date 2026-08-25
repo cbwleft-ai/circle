@@ -58,6 +58,56 @@ npm start
 
 更多接入方式（HTTP / 微信）与配置项见 [docs/usage.md](docs/usage.md)。
 
+## 多模态（图片输入，issue #3）
+
+用户可通过 IM（微信/HTTP）发送图片，Worker 执行任务时图片直接作为模型图片输入（无需 OCR 预处理）：
+
+```bash
+# 微信：直接发图片即可（自动下载并传给 Worker）
+# HTTP：POST /message 携带 attachments（base64）
+curl -X POST http://localhost:8787/message -H 'Content-Type: application/json' -d '{
+  "chatId": "user-1",
+  "text": "看下这张截图里的报错",
+  "attachments": [{"kind": "image", "name": "err.png", "mimeType": "image/png", "data": "<base64>"}]
+}'
+```
+
+图片会落盘到 `{dataDir}/uploads/`，随任务派发给 Worker，作为图片输入传给模型（每图最多 ~384 tokens）。
+
+### 使用 DeepSeek 多模态模型（vision-exp）
+
+需要把 `deepseek-v4-flash-vision-exp` 注册进 pi 模型目录（内置目录暂未收录该实验模型），写入 `~/.pi/agent/models.json`：
+
+```json
+{
+  "providers": {
+    "deepseek": {
+      "baseUrl": "https://api.deepseek.com",
+      "api": "openai-completions",
+      "models": [
+        { "id": "deepseek-v4-flash", "input": ["text"] },
+        { "id": "deepseek-v4-flash-vision-exp", "input": ["text", "image"], "reasoning": true }
+      ]
+    }
+  }
+}
+```
+
+## Coordinator 与 Worker 使用不同模型
+
+默认两者共用 `CIRCLE_MODEL_PROVIDER` / `CIRCLE_MODEL_ID`；可分别覆盖（例如 Coordinator 用文本模型保持快速/低成本，Worker 用多模态模型）：
+
+```bash
+export CIRCLE_COORDINATOR_MODEL_ID=deepseek-v4-flash          # Coordinator（对话/路由）
+export CIRCLE_WORKER_MODEL_ID=deepseek-v4-flash-vision-exp    # Worker（执行，可看图）
+```
+
+也可在 `CIRCLE_WORKERS` 里给单个 Worker 指定专属模型：
+
+```bash
+export CIRCLE_WORKERS='[{"name":"dev","description":"开发","cwd":"/tmp/dev","modelId":"deepseek-v4-pro"}]'
+```
+
 ## 测试
 
 ```bash

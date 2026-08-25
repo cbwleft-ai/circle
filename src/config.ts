@@ -23,6 +23,14 @@ export interface AppConfig {
   modelProvider: string;
   /** 模型 id */
   modelId: string;
+  /** Coordinator 专用模型 provider（回退到 modelProvider） */
+  coordinatorModelProvider: string;
+  /** Coordinator 专用模型 id（回退到 modelId） */
+  coordinatorModelId: string;
+  /** Worker 专用模型 provider（回退到 modelProvider，WorkerConfig 可再覆盖） */
+  workerModelProvider: string;
+  /** Worker 专用模型 id（回退到 modelId，WorkerConfig 可再覆盖） */
+  workerModelId: string;
   /** Coordinator 思考级别 */
   coordinatorThinkingLevel: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
   /** Worker 思考级别 */
@@ -80,6 +88,10 @@ export function loadConfig(): AppConfig {
     agentDir: env("CIRCLE_AGENT_DIR") ?? process.env.HOME + "/.pi/agent",
     modelProvider: env("CIRCLE_MODEL_PROVIDER") ?? "deepseek",
     modelId: env("CIRCLE_MODEL_ID") ?? "deepseek-v4-flash",
+    coordinatorModelProvider: env("CIRCLE_COORDINATOR_MODEL_PROVIDER") ?? env("CIRCLE_MODEL_PROVIDER") ?? "deepseek",
+    coordinatorModelId: env("CIRCLE_COORDINATOR_MODEL_ID") ?? env("CIRCLE_MODEL_ID") ?? "deepseek-v4-flash",
+    workerModelProvider: env("CIRCLE_WORKER_MODEL_PROVIDER") ?? env("CIRCLE_MODEL_PROVIDER") ?? "deepseek",
+    workerModelId: env("CIRCLE_WORKER_MODEL_ID") ?? env("CIRCLE_MODEL_ID") ?? "deepseek-v4-flash",
     coordinatorThinkingLevel:
       (env("CIRCLE_COORDINATOR_THINKING") as AppConfig["coordinatorThinkingLevel"]) ?? "low",
     workerThinkingLevel:

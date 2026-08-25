@@ -1,7 +1,7 @@
 /**
  * 测试适配器：内存实现，供自动化测试注入消息并捕获回复。
  */
-import type { ChatMessage, OutboundFile } from "../core/types.js";
+import type { ChatAttachment, ChatMessage, OutboundFile } from "../core/types.js";
 import type { ImAdapter } from "./adapter.js";
 
 export class TestAdapter implements ImAdapter {
@@ -17,9 +17,9 @@ export class TestAdapter implements ImAdapter {
   async start(): Promise<void> {}
   async stop(): Promise<void> {}
 
-  /** 测试注入上行消息 */
-  async inject(chatId: string, text: string): Promise<void> {
-    this.handler?.({ chatId, text });
+  /** 测试注入上行消息（可携带附件，issue #3） */
+  async inject(chatId: string, text: string, attachments?: ChatAttachment[]): Promise<void> {
+    this.handler?.({ chatId, text, attachments });
   }
 
   async send(chatId: string, text: string): Promise<void> {

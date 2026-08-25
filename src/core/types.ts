@@ -55,6 +55,8 @@ export interface Task {
   scheduleId?: string;
   /** 发起对话的 chatId（用于异步结果汇报） */
   requestChatId?: string;
+  /** 用户附带的图片/文件（落盘路径），Worker 执行时作为图片输入传给模型（issue #3） */
+  attachments?: TaskAttachment[];
   createdAt: number;
   startedAt?: number;
   completedAt?: number;
@@ -97,12 +99,41 @@ export interface WorkerConfig {
   tools?: string[];
   /** 技能（SKILL.md 文件路径列表，可选） */
   skills?: string[];
+  /** 该 Worker 专用的模型 provider（可选，覆盖全局 worker 模型配置） */
+  modelProvider?: string;
+  /** 该 Worker 专用的模型 id（可选，覆盖全局 worker 模型配置） */
+  modelId?: string;
 }
 
 /** 对话消息（IM 层与团队层之间的统一结构） */
 export interface ChatMessage {
   chatId: string;
   text: string;
+  /** 附带附件（图片/文件），base64 内容或本地路径，由 IM 适配器提供（issue #3） */
+  attachments?: ChatAttachment[];
+}
+
+/**
+ * 上行附件（IM 适配器 → 团队层）。
+ * - `data`: base64 内容（适配器已下载/转码）；
+ * - `localPath`: 已落盘的本地文件（二选一，优先 localPath）。
+ */
+export interface ChatAttachment {
+  kind: "image" | "file";
+  /** 文件名（含扩展名，可选） */
+  name?: string;
+  mimeType?: string;
+  /** base64 内容 */
+  data?: string;
+  /** 已落盘文件的本地路径 */
+  localPath?: string;
+}
+
+/** 任务附带的图片/文件（团队层落盘后写入任务，Worker 执行时读取） */
+export interface TaskAttachment {
+  /** 落盘后的绝对路径 */
+  path: string;
+  mimeType?: string;
 }
 
 /** 下行文件消息载荷（附件） */

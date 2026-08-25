@@ -2,9 +2,9 @@
  * 单元测试：安全评估 / cron / 任务存储 / 定时任务存储 / 工作空间 / IM 适配器。
  * 全部确定性执行，不依赖 LLM。
  */
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import { parseCron, nextRun, matches } from "../src/core/cron.js";
 import { assessSafety } from "../src/core/safety.js";
 import { TaskStore } from "../src/core/task-store.js";
@@ -928,6 +928,138 @@ export async function runUnitTests(): Promise<TestResult[]> {
         sched.stop();
       } finally {
         rmSync(dir, { recursive: true, force: true });
+      }
+    }),
+  );
+
+  // ---------- 多模态 / 模型独立配置 ----------
+  results.push(
+    await runCase("U-31", "多模态", "附件落盘与消息富化（AttachmentStore + buildMessageWithAttachments）", async (t) => {
+      const dir = mkdtempSync(join(tmpdir(), "circle-unit-upload-"));
+      try {
+        const { AttachmentStore, buildMessageWithAttachments } = await import("../src/core/upload.js");
+        const store = new AttachmentStore(dir);
+        // 本地路径附件（引用已有文件）
+        const local = join(dir, "already.png");
+        writeFileSync(local, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+        const saved1 = store.save("c1", [{ kind: "image", name: "already.png", mimeType: "image/png", localPath: local }]);
+        t.assert(saved1.length === 1 && saved1[0]!.localPath === local, "本地路径附件应直接引用");
+        // base64 附件（落盘到 uploads/c2/）
+        const saved2 = store.save("c2", [{ kind: "image", name: "shot.png", mimeType: "image/png", data: Buffer.from("fakeimg").toString("base64") }]);
+        t.assert(saved2.length === 1, "base64 附件应落盘");
+        t.assert(
+          saved2[0]!.localPath.startsWith(join(dir, "c2")) && saved2[0]!.localPath.endsWith("shot.png"),
+          `应落盘到 <root>/c2/*-shot.png: ${saved2[0]!.localPath}`,
+        );
+        t.assert(existsSync(saved2[0]!.localPath), "落盘文件应存在");
+        t.assert(readFileSync(saved2[0]!.localPath).toString() === "fakeimg", "落盘内容应为原始字节");
+        // 无数据无路径的附件跳过
+        t.assert(store.save("c3", [{ kind: "image" }]).length === 0, "空附件应跳过");
+        // 路径穿越文件名被净化：分隔符替换后为单个文件名，落盘仍在会话目录内
+        const saved3 = store.save("c4", [{ kind: "image", name: "../../evil.png", data: Buffer.from("x").toString("base64") }]);
+        t.assert(
+          saved3.length === 1 && saved3[0]!.localPath.startsWith(join(dir, "c4")),
+          `净化后应仍在会话目录内: ${saved3[0]?.localPath}`,
+        );
+        t.assert(!saved3[0]!.localPath.split(sep).includes(".."), "路径段中不应出现 ..");
+        // 消息富化：带图标记 + 空文本兜底文案
+        t.assert(
+          buildMessageWithAttachments("看下这张图", saved2).includes("【图片】") &&
+            buildMessageWithAttachments("看下这张图", saved2).includes("看下这张图"),
+          "富化文本应含【图片】标记与原文",
+        );
+        t.assert(
+          buildMessageWithAttachments("", saved2).includes("请处理"),
+          "空文本时应给出处理引导",
+        );
+        t.assert(buildMessageWithAttachments("无附件", []) === "无附件", "无附件应原样返回");
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }),
+  );
+
+  results.push(
+    await runCase("U-32", "多模态", "Worker 图片输入 loadTaskImages（读取/损坏跳过/默认 MIME）", async (t) => {
+      const dir = mkdtempSync(join(tmpdir(), "circle-unit-images-"));
+      try {
+        const { loadTaskImages } = await import("../src/agents/worker.js");
+        const png = join(dir, "a.png");
+        const jpg = join(dir, "b.jpg");
+        writeFileSync(png, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+        writeFileSync(jpg, Buffer.from("jpgbytes"));
+        // 正常 + 损坏（不存在）文件
+        const images = loadTaskImages([
+          { path: png, mimeType: "image/png" },
+          { path: jpg },
+          { path: join(dir, "missing.png") },
+        ]);
+        t.assert(images.length === 2, `应读取 2 张图片（损坏跳过），实际 ${images.length}`);
+        t.assert(images[0]!.type === "image" && images[0]!.mimeType === "image/png", "应保留 mimeType");
+        t.assert(images[0]!.data === Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).toString("base64"), "base64 内容应一致");
+        t.assert(images[1]!.mimeType === "image/jpeg", "未指定 mimeType 应默认 image/jpeg");
+        // 无附件
+        t.assert(loadTaskImages(undefined).length === 0, "无附件应返回空");
+        // 注入 fs 便于测试
+        const fakeFs = { readFileSync: () => Buffer.from("zzz") };
+        const viaFs = loadTaskImages([{ path: png }], fakeFs);
+        t.assert(viaFs.length === 1 && viaFs[0]!.data === "enp6", "应使用注入的 fs 读取");
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }),
+  );
+
+  results.push(
+    await runCase("U-33", "多模态", "派发附加图片 buildDispatchWithAttachments", async (t) => {
+      const { buildDispatchWithAttachments } = await import("../src/team/agent-team.js");
+      const pending = [{ path: "/tmp/u/a.png", mimeType: "image/png" }];
+      const r = buildDispatchWithAttachments("描述图片", pending);
+      t.assert(r.attachments === pending, "应透传附件");
+      t.assert(r.description.includes("1 张图片") && r.description.startsWith("描述图片"), "描述应追加图片说明");
+      const empty = buildDispatchWithAttachments("普通任务", undefined);
+      t.assert(empty.attachments === undefined && empty.description === "普通任务", "无附件应原样返回");
+    }),
+  );
+
+  results.push(
+    await runCase("U-34", "模型配置", "Coordinator/Worker 可独立配置模型（回退全局）", async (t) => {
+      const { loadConfig } = await import("../src/config.js");
+      const old: Record<string, string | undefined> = {};
+      for (const k of [
+        "CIRCLE_COORDINATOR_MODEL_PROVIDER",
+        "CIRCLE_COORDINATOR_MODEL_ID",
+        "CIRCLE_WORKER_MODEL_PROVIDER",
+        "CIRCLE_WORKER_MODEL_ID",
+        "CIRCLE_MODEL_PROVIDER",
+        "CIRCLE_MODEL_ID",
+      ]) {
+        old[k] = process.env[k];
+        delete process.env[k];
+      }
+      try {
+        // 未配置 → 全部回退到全局默认
+        const d = loadConfig();
+        t.assert(d.coordinatorModelProvider === "deepseek" && d.coordinatorModelId === "deepseek-v4-flash", "默认应回退 deepseek-v4-flash");
+        t.assert(d.workerModelProvider === "deepseek" && d.workerModelId === "deepseek-v4-flash", "Worker 默认应同全局");
+        // 仅配置全局 → 跟随全局
+        process.env.CIRCLE_MODEL_PROVIDER = "deepseek";
+        process.env.CIRCLE_MODEL_ID = "deepseek-v4-pro";
+        const g = loadConfig();
+        t.assert(g.coordinatorModelId === "deepseek-v4-pro" && g.workerModelId === "deepseek-v4-pro", "应跟随全局模型");
+        // Coordinator 与 Worker 分别覆盖
+        process.env.CIRCLE_COORDINATOR_MODEL_ID = "deepseek-v4-flash";
+        process.env.CIRCLE_WORKER_MODEL_ID = "deepseek-v4-flash-vision-exp";
+        const s = loadConfig();
+        t.assert(s.coordinatorModelId === "deepseek-v4-flash", `Coordinator 应独立配置，实际 ${s.coordinatorModelId}`);
+        t.assert(s.workerModelId === "deepseek-v4-flash-vision-exp", `Worker 应独立配置，实际 ${s.workerModelId}`);
+        t.assert(s.coordinatorModelId !== s.workerModelId, "Coordinator 与 Worker 模型应可不同");
+        t.log(`Coordinator=${s.coordinatorModelProvider}/${s.coordinatorModelId}，Worker=${s.workerModelProvider}/${s.workerModelId}`);
+      } finally {
+        for (const [k, v] of Object.entries(old)) {
+          if (v === undefined) delete process.env[k];
+          else process.env[k] = v;
+        }
       }
     }),
   );
