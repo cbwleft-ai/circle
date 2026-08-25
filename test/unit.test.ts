@@ -2,9 +2,9 @@
  * 单元测试：安全评估 / cron / 任务存储 / 定时任务存储 / 工作空间 / IM 适配器。
  * 全部确定性执行，不依赖 LLM。
  */
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import { parseCron, nextRun, matches } from "../src/core/cron.js";
 import { assessSafety } from "../src/core/safety.js";
 import { TaskStore } from "../src/core/task-store.js";
@@ -971,6 +971,65 @@ export async function runUnitTests(): Promise<TestResult[]> {
           else process.env[k] = v;
         }
       }
+    }),
+  );
+
+  // ---------- 多模态：附件落盘与派发透传 ----------
+  results.push(
+    await runCase("U-31", "多模态", "附件落盘与消息富化（AttachmentStore + buildMessageWithAttachments）", async (t) => {
+      const dir = mkdtempSync(join(tmpdir(), "circle-unit-upload-"));
+      try {
+        const { AttachmentStore, buildMessageWithAttachments } = await import("../src/core/upload.js");
+        const store = new AttachmentStore(dir);
+        // 本地路径附件（引用已有文件）
+        const local = join(dir, "already.png");
+        writeFileSync(local, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+        const saved1 = store.save("c1", [{ kind: "image", name: "already.png", mimeType: "image/png", localPath: local }]);
+        t.assert(saved1.length === 1 && saved1[0]!.localPath === local, "本地路径附件应直接引用");
+        // base64 附件（落盘到 uploads/c2/）
+        const saved2 = store.save("c2", [{ kind: "image", name: "shot.png", mimeType: "image/png", data: Buffer.from("fakeimg").toString("base64") }]);
+        t.assert(saved2.length === 1, "base64 附件应落盘");
+        t.assert(
+          saved2[0]!.localPath.startsWith(join(dir, "c2")) && saved2[0]!.localPath.endsWith("shot.png"),
+          `应落盘到 <root>/c2/*-shot.png: ${saved2[0]!.localPath}`,
+        );
+        t.assert(existsSync(saved2[0]!.localPath), "落盘文件应存在");
+        t.assert(readFileSync(saved2[0]!.localPath).toString() === "fakeimg", "落盘内容应为原始字节");
+        // 无数据无路径的附件跳过
+        t.assert(store.save("c3", [{ kind: "image" }]).length === 0, "空附件应跳过");
+        // 路径穿越文件名被净化：分隔符替换后为单个文件名，落盘仍在会话目录内
+        const saved3 = store.save("c4", [{ kind: "image", name: "../../evil.png", data: Buffer.from("x").toString("base64") }]);
+        t.assert(
+          saved3.length === 1 && saved3[0]!.localPath.startsWith(join(dir, "c4")),
+          `净化后应仍在会话目录内: ${saved3[0]?.localPath}`,
+        );
+        t.assert(!saved3[0]!.localPath.split(sep).includes(".."), "路径段中不应出现 ..");
+        // 消息富化：带图标记 + 空文本兜底文案
+        t.assert(
+          buildMessageWithAttachments("看下这张图", saved2).includes("【图片】") &&
+            buildMessageWithAttachments("看下这张图", saved2).includes("看下这张图"),
+          "富化文本应含【图片】标记与原文",
+        );
+        t.assert(
+          buildMessageWithAttachments("", saved2).includes("请处理"),
+          "空文本时应给出处理引导",
+        );
+        t.assert(buildMessageWithAttachments("无附件", []) === "无附件", "无附件应原样返回");
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }),
+  );
+
+  results.push(
+    await runCase("U-33", "多模态", "派发附加图片 buildDispatchWithAttachments", async (t) => {
+      const { buildDispatchWithAttachments } = await import("../src/team/agent-team.js");
+      const pending = [{ path: "/tmp/u/a.png", mimeType: "image/png" }];
+      const r = buildDispatchWithAttachments("描述图片", pending);
+      t.assert(r.attachments === pending, "应透传附件");
+      t.assert(r.description.includes("1 张图片") && r.description.startsWith("描述图片"), "描述应追加图片说明");
+      const empty = buildDispatchWithAttachments("普通任务", undefined);
+      t.assert(empty.attachments === undefined && empty.description === "普通任务", "无附件应原样返回");
     }),
   );
 

@@ -6,7 +6,7 @@
  * - GET  /ping                             存活检查（用于网关校验）
  */
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import type { ChatMessage } from "../core/types.js";
+import type { ChatAttachment, ChatMessage } from "../core/types.js";
 import { log } from "../core/logger.js";
 import type { ImAdapter } from "./adapter.js";
 
@@ -40,15 +40,19 @@ export class HttpAdapter implements ImAdapter {
     }
     if (req.method === "POST" && url.pathname === "/message") {
       const body = await readBody(req);
-      const { chatId, text } = JSON.parse(body) as { chatId?: string; text?: string };
-      if (!chatId || !text) {
-        writeJson(res, 400, { ok: false, error: "需要 chatId 与 text 字段" });
+      const { chatId, text, attachments } = JSON.parse(body) as {
+        chatId?: string;
+        text?: string;
+        attachments?: ChatAttachment[];
+      };
+      if (!chatId || (!text && !(attachments && attachments.length > 0))) {
+        writeJson(res, 400, { ok: false, error: "需要 chatId 与 text/attachments 字段" });
         return;
       }
       // 异步处理，立即返回 202
       const cb = this.handler;
       if (cb) {
-        setImmediate(() => cb({ chatId, text }));
+        setImmediate(() => cb({ chatId, text: text ?? "", attachments }));
       }
       writeJson(res, 202, { ok: true, received: true });
       return;
@@ -76,7 +80,8 @@ function readBody(req: IncomingMessage): Promise<string> {
     let data = "";
     req.on("data", (c) => {
       data += c;
-      if (data.length > 1_000_000) reject(new Error("body too large"));
+      // 10MB 上限：容纳 base64 图片附件（多模态，issue #3）
+      if (data.length > 10_000_000) reject(new Error("body too large"));
     });
     req.on("end", () => resolve(data));
     req.on("error", reject);
