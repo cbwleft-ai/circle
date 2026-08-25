@@ -84,7 +84,7 @@ export function buildMessageWithAttachments(
   const joined = lines.join("\n");
   const trimmed = (text ?? "").trim();
   if (!trimmed) {
-    return `用户发送了以下附件，请处理（图片请描述内容 / 识别图中文字）：\n${joined}`;
+    return `用户发送了以下附件，请派发任务给 Worker 查看并处理（图片请描述内容 / 识别图中文字）：\n${joined}`;
   }
   return `${joined}\n用户消息：${trimmed}`;
 }

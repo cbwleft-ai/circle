@@ -1011,8 +1011,8 @@ export async function runUnitTests(): Promise<TestResult[]> {
           "富化文本应含【图片】标记与原文",
         );
         t.assert(
-          buildMessageWithAttachments("", saved2).includes("请处理"),
-          "空文本时应给出处理引导",
+          buildMessageWithAttachments("", saved2).includes("请派发任务给 Worker"),
+          "空文本时应引导派发给 Worker",
         );
         t.assert(buildMessageWithAttachments("无附件", []) === "无附件", "无附件应原样返回");
       } finally {
