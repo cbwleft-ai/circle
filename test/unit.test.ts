@@ -1064,6 +1064,24 @@ export async function runUnitTests(): Promise<TestResult[]> {
     }),
   );
 
+  results.push(
+    await runCase("U-35", "多模态", "Coordinator 提示词含多模态派发规则（图片标记→派发 Worker）", async (t) => {
+      const { CoordinatorAgent } = await import("../src/agents/coordinator.js");
+      const { loadConfig } = await import("../src/config.js");
+      const c = new CoordinatorAgent(undefined as never, loadConfig(), {
+        listWorkers: () => [],
+      } as never);
+      const prompt = (c as unknown as { buildSystemPrompt(): string }).buildSystemPrompt();
+      t.assert(prompt.includes("【图片】"), "提示词应解释【图片】标记含义");
+      t.assert(prompt.includes("dispatch_task"), "提示词应要求派发任务给 Worker");
+      t.assert(
+        prompt.includes("禁止") && prompt.includes("无法查看图片"),
+        "提示词应禁止「我无法查看图片」话术（直接派发）",
+      );
+      t.assert(prompt.includes("无需") && prompt.includes("路径"), "提示词应说明无需在任务描述中写路径");
+    }),
+  );
+
   // ---------- IM 测试适配器 ----------
   results.push(
     await runCase("U-17", "IM 适配器", "TestAdapter 注入与等待", async (t) => {
