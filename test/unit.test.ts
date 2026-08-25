@@ -932,6 +932,48 @@ export async function runUnitTests(): Promise<TestResult[]> {
     }),
   );
 
+  results.push(
+    await runCase("U-34", "模型配置", "Coordinator/Worker 可独立配置模型（回退全局）", async (t) => {
+      const { loadConfig } = await import("../src/config.js");
+      const old: Record<string, string | undefined> = {};
+      for (const k of [
+        "CIRCLE_COORDINATOR_MODEL_PROVIDER",
+        "CIRCLE_COORDINATOR_MODEL_ID",
+        "CIRCLE_WORKER_MODEL_PROVIDER",
+        "CIRCLE_WORKER_MODEL_ID",
+        "CIRCLE_MODEL_PROVIDER",
+        "CIRCLE_MODEL_ID",
+      ]) {
+        old[k] = process.env[k];
+        delete process.env[k];
+      }
+      try {
+        // 未配置 → 全部回退到全局默认
+        const d = loadConfig();
+        t.assert(d.coordinatorModelProvider === "deepseek" && d.coordinatorModelId === "deepseek-v4-flash", "默认应回退 deepseek-v4-flash");
+        t.assert(d.workerModelProvider === "deepseek" && d.workerModelId === "deepseek-v4-flash", "Worker 默认应同全局");
+        // 仅配置全局 → 跟随全局
+        process.env.CIRCLE_MODEL_PROVIDER = "deepseek";
+        process.env.CIRCLE_MODEL_ID = "deepseek-v4-pro";
+        const g = loadConfig();
+        t.assert(g.coordinatorModelId === "deepseek-v4-pro" && g.workerModelId === "deepseek-v4-pro", "应跟随全局模型");
+        // Coordinator 与 Worker 分别覆盖
+        process.env.CIRCLE_COORDINATOR_MODEL_ID = "deepseek-v4-flash";
+        process.env.CIRCLE_WORKER_MODEL_ID = "deepseek-v4-flash-vision-exp";
+        const s = loadConfig();
+        t.assert(s.coordinatorModelId === "deepseek-v4-flash", `Coordinator 应独立配置，实际 ${s.coordinatorModelId}`);
+        t.assert(s.workerModelId === "deepseek-v4-flash-vision-exp", `Worker 应独立配置，实际 ${s.workerModelId}`);
+        t.assert(s.coordinatorModelId !== s.workerModelId, "Coordinator 与 Worker 模型应可不同");
+        t.log(`Coordinator=${s.coordinatorModelProvider}/${s.coordinatorModelId}，Worker=${s.workerModelProvider}/${s.workerModelId}`);
+      } finally {
+        for (const [k, v] of Object.entries(old)) {
+          if (v === undefined) delete process.env[k];
+          else process.env[k] = v;
+        }
+      }
+    }),
+  );
+
   // ---------- IM 测试适配器 ----------
   results.push(
     await runCase("U-17", "IM 适配器", "TestAdapter 注入与等待", async (t) => {

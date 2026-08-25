@@ -50,10 +50,13 @@ export class CoordinatorAgent {
     });
     await loader.reload();
 
-    const model = this.modelRuntime.getModel(this.config.modelProvider, this.config.modelId);
+    const model = this.modelRuntime.getModel(
+      this.config.coordinatorModelProvider,
+      this.config.coordinatorModelId,
+    );
     if (!model) {
       throw new Error(
-        `模型 ${this.config.modelProvider}/${this.config.modelId} 未找到，请检查 models.json 或环境配置`,
+        `Coordinator 模型 ${this.config.coordinatorModelProvider}/${this.config.coordinatorModelId} 未找到，请检查 models.json 或环境配置`,
       );
     }
 

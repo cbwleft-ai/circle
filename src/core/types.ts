@@ -97,6 +97,10 @@ export interface WorkerConfig {
   tools?: string[];
   /** 技能（SKILL.md 文件路径列表，可选） */
   skills?: string[];
+  /** 该 Worker 专用的模型 provider（可选，覆盖全局 worker 模型配置） */
+  modelProvider?: string;
+  /** 该 Worker 专用的模型 id（可选，覆盖全局 worker 模型配置） */
+  modelId?: string;
 }
 
 /** 对话消息（IM 层与团队层之间的统一结构） */

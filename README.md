@@ -58,6 +58,21 @@ npm start
 
 更多接入方式（HTTP / 微信）与配置项见 [docs/usage.md](docs/usage.md)。
 
+## Coordinator 与 Worker 使用不同模型
+
+默认两者共用 `CIRCLE_MODEL_PROVIDER` / `CIRCLE_MODEL_ID`；可分别覆盖（例如 Coordinator 用文本模型保持快速/低成本，Worker 用更强的执行模型）：
+
+```bash
+export CIRCLE_COORDINATOR_MODEL_ID=deepseek-v4-flash          # Coordinator（对话/路由）
+export CIRCLE_WORKER_MODEL_ID=deepseek-v4-pro                 # Worker（执行）
+```
+
+也可在 `CIRCLE_WORKERS` 里给单个 Worker 指定专属模型：
+
+```bash
+export CIRCLE_WORKERS='[{"name":"dev","description":"开发","cwd":"/tmp/dev","modelId":"deepseek-v4-pro"}]'
+```
+
 ## 测试
 
 ```bash
