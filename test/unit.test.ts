@@ -1033,6 +1033,175 @@ export async function runUnitTests(): Promise<TestResult[]> {
     }),
   );
 
+  results.push(
+    await runCase("U-32", "多模态", "Worker 图片输入 loadTaskImages（读取/损坏跳过/默认 MIME）", async (t) => {
+      const dir = mkdtempSync(join(tmpdir(), "circle-unit-images-"));
+      try {
+        const { loadTaskImages } = await import("../src/agents/worker.js");
+        const png = join(dir, "a.png");
+        const jpg = join(dir, "b.jpg");
+        writeFileSync(png, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+        writeFileSync(jpg, Buffer.from("jpgbytes"));
+        // 正常 + 损坏（不存在）文件
+        const images = loadTaskImages([
+          { path: png, mimeType: "image/png" },
+          { path: jpg },
+          { path: join(dir, "missing.png") },
+        ]);
+        t.assert(images.length === 2, `应读取 2 张图片（损坏跳过），实际 ${images.length}`);
+        t.assert(images[0]!.type === "image" && images[0]!.mimeType === "image/png", "应保留 mimeType");
+        t.assert(images[0]!.data === Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).toString("base64"), "base64 内容应一致");
+        t.assert(images[1]!.mimeType === "image/jpeg", "未指定 mimeType 应默认 image/jpeg");
+        // 无附件
+        t.assert(loadTaskImages(undefined).length === 0, "无附件应返回空");
+        // 注入 fs 便于测试
+        const fakeFs = { readFileSync: () => Buffer.from("zzz") };
+        const viaFs = loadTaskImages([{ path: png }], fakeFs);
+        t.assert(viaFs.length === 1 && viaFs[0]!.data === "enp6", "应使用注入的 fs 读取");
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }),
+  );
+
+  results.push(
+    await runCase("U-35", "多模态", "Coordinator 提示词含多模态派发规则（图片标记→派发 Worker）", async (t) => {
+      const { CoordinatorAgent } = await import("../src/agents/coordinator.js");
+      const { loadConfig } = await import("../src/config.js");
+      const c = new CoordinatorAgent(undefined as never, loadConfig(), {
+        listWorkers: () => [],
+      } as never);
+      const prompt = (c as unknown as { buildSystemPrompt(): string }).buildSystemPrompt();
+      t.assert(prompt.includes("【图片】"), "提示词应解释【图片】标记含义");
+      t.assert(prompt.includes("dispatch_task"), "提示词应要求派发任务给 Worker");
+      t.assert(
+        prompt.includes("禁止") && prompt.includes("无法查看图片"),
+        "提示词应禁止「我无法查看图片」话术（直接派发）",
+      );
+      t.assert(prompt.includes("无需") && prompt.includes("路径"), "提示词应说明无需在任务描述中写路径");
+    }),
+  );
+
+  results.push(
+    await runCase("U-36", "多模态", "微信图片附件提取：url / full_url / media 字符串 / media 加密对象（AES 解密）", async (t) => {
+      const { createServer } = await import("node:http");
+      const { createCipheriv } = await import("node:crypto");
+      const { extractAttachments, toImageDownloadRef } = await import("../src/im/weixin-ilink.js");
+
+      const png = Buffer.concat([
+        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+        Buffer.from("fake-png-body"),
+      ]);
+      // 加密一份 PNG（模拟微信 CDN 的 AES-128-ECB 密文下载）
+      const aesKey = Buffer.from("0123456789abcdef"); // 16 字节
+      const cipher = createCipheriv("aes-128-ecb", aesKey, null);
+      const encrypted = Buffer.concat([cipher.update(png), cipher.final()]);
+
+      const server = createServer((req, res) => {
+        const url = new URL(req.url ?? "/", "http://localhost");
+        if (url.pathname === "/plain.png") {
+          res.writeHead(200, { "Content-Type": "image/png" });
+          res.end(png);
+        } else if (
+          (url.pathname === "/download" || url.pathname === "/c2c/download") &&
+          url.searchParams.has("encrypted_query_param")
+        ) {
+          res.writeHead(200, { "Content-Type": "application/octet-stream" });
+          res.end(encrypted);
+        } else {
+          res.writeHead(404);
+          res.end("not found");
+        }
+      });
+      await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+      const port = (server.address() as { port: number }).port;
+      const base = `http://127.0.0.1:${port}`;
+      try {
+        // 1) url 直链 → 明文提取
+        const r1 = await extractAttachments(
+          { item_list: [{ type: 2, image_item: { url: `${base}/plain.png`, name: "a.png" } }] },
+          base,
+        );
+        t.assert(r1.length === 1, `url 直链应提取成功，实际 ${r1.length}`);
+        t.assert(r1[0]!.data === png.toString("base64"), "url 直链内容应一致");
+
+        // 2) media 加密对象（真实报文形态）：full_url + encrypt_query_param + aes_key(base64)
+        const aesKeyB64 = aesKey.toString("base64");
+        const r2 = await extractAttachments(
+          {
+            item_list: [
+              {
+                type: 2,
+                image_item: {
+                  media: {
+                    encrypt_query_param: "p-123",
+                    aes_key: aesKeyB64,
+                    full_url: `${base}/download?encrypted_query_param=p-123`,
+                  },
+                },
+              },
+            ],
+          },
+          base,
+        );
+        t.assert(r2.length === 1, `media 加密对象（full_url + aes_key）应解密提取成功，实际 ${r2.length}`);
+        t.assert(r2[0]!.data === png.toString("base64"), "解密后内容应为原始 PNG");
+        t.assert(r2[0]!.mimeType === "image/png", "应推断出 image/png");
+
+        // 3) media 加密对象但 aes_key 缺失，改用顶层 aeskey（hex）解密（真实报文形态）
+        const aesKeyHex = aesKey.toString("hex");
+        const r3 = await extractAttachments(
+          {
+            item_list: [
+              {
+                type: 2,
+                image_item: {
+                  aeskey: aesKeyHex,
+                  media: {
+                    encrypt_query_param: "p-456",
+                    full_url: `${base}/c2c/download?encrypted_query_param=p-456`,
+                  },
+                },
+              },
+            ],
+          },
+          base,
+        );
+        t.assert(r3.length === 1, `顶层 aeskey(hex) 应能解密提取，实际 ${r3.length}`);
+        t.assert(r3[0]!.data === png.toString("base64"), "hex 密钥解密后内容应为原始 PNG");
+
+        // 4) media 字符串（CDN key）→ CDN 不可达时跳过而非抛错
+        const r4 = await extractAttachments(
+          { item_list: [{ type: 2, image_item: { media: "some/key.png" } }] },
+          base,
+        );
+        t.assert(r4.length === 0, "CDN 不可达时应跳过附件（不抛错）");
+
+        // 5) 非图片响应（HTML 错误页）不应被当作图片
+        const r5 = await extractAttachments(
+          { item_list: [{ type: 2, image_item: { url: `${base}/nope.html` } }] },
+          base,
+        );
+        t.assert(r5.length === 0, "非图片响应应跳过");
+
+        // 6) toImageDownloadRef 规整：full_url / url / media 字符串 / media 对象 / 空
+        t.assert(toImageDownloadRef({ url: "http://x/a.png" })?.url === "http://x/a.png", "url 应直接使用");
+        t.assert(toImageDownloadRef({ media: "k.png" })?.media === "k.png", "media 字符串应识别");
+        const ref = toImageDownloadRef({
+          aeskey: aesKeyHex,
+          media: { encrypt_query_param: "p", aes_key: aesKeyB64, full_url: "http://x/f" },
+        });
+        t.assert(ref?.fullUrl === "http://x/f" && ref?.queryParam === "p", "media 对象应规整（含 full_url）");
+        t.assert(ref?.aesKey === aesKeyB64 && ref?.aesKeyHex === aesKeyHex, "应同时保留两个密钥形式");
+        t.assert(toImageDownloadRef({}) === undefined, "空 image_item 应返回 undefined");
+
+        t.log(`url 直链 ✅ / full_url+aes_key 解密 ✅ / aeskey(hex) 解密 ✅ / media 字符串不可达跳过 ✅ / 非图片跳过 ✅`);
+      } finally {
+        await new Promise<void>((r) => server.close(() => r()));
+      }
+    }),
+  );
+
   // ---------- IM 测试适配器 ----------
   results.push(
     await runCase("U-17", "IM 适配器", "TestAdapter 注入与等待", async (t) => {
