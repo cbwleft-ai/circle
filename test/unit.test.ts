@@ -1082,6 +1082,90 @@ export async function runUnitTests(): Promise<TestResult[]> {
     }),
   );
 
+  results.push(
+    await runCase("U-36", "多模态", "微信图片附件提取：url 直链 / media 字符串 / media 加密对象（AES 解密）", async (t) => {
+      const { createServer } = await import("node:http");
+      const { createCipheriv } = await import("node:crypto");
+      const { extractAttachments, toImageDownloadRef } = await import("../src/im/weixin-ilink.js");
+
+      const png = Buffer.concat([
+        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+        Buffer.from("fake-png-body"),
+      ]);
+      // 加密一份 PNG（模拟微信 CDN 的 AES-128-ECB 密文下载）
+      const aesKey = Buffer.from("0123456789abcdef"); // 16 字节
+      const cipher = createCipheriv("aes-128-ecb", aesKey, null);
+      const encrypted = Buffer.concat([cipher.update(png), cipher.final()]);
+
+      const server = createServer((req, res) => {
+        const url = new URL(req.url ?? "/", "http://localhost");
+        if (url.pathname === "/plain.png") {
+          res.writeHead(200, { "Content-Type": "image/png" });
+          res.end(png);
+        } else if (url.pathname === "/download" && url.searchParams.has("encrypted_query_param")) {
+          res.writeHead(200, { "Content-Type": "application/octet-stream" });
+          res.end(encrypted);
+        } else {
+          res.writeHead(404);
+          res.end("not found");
+        }
+      });
+      await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+      const port = (server.address() as { port: number }).port;
+      const base = `http://127.0.0.1:${port}`;
+      try {
+        // 1) url 直链 → 明文提取
+        const r1 = await extractAttachments(
+          { item_list: [{ type: 2, image_item: { url: `${base}/plain.png`, name: "a.png" } }] },
+          base,
+        );
+        t.assert(r1.length === 1, `url 直链应提取成功，实际 ${r1.length}`);
+        t.assert(r1[0]!.data === png.toString("base64"), "url 直链内容应一致");
+
+        // 2) media 加密对象（encrypt_query_param + aes_key）→ CDN 下载密文 → AES 解密 → 提取
+        const aesKeyB64 = aesKey.toString("base64");
+        const r2 = await extractAttachments(
+          {
+            item_list: [
+              { type: 2, image_item: { media: { encrypt_query_param: "p-123", aes_key: aesKeyB64 } } },
+            ],
+          },
+          base,
+          undefined,
+          base, // cdnBase 指向本地 server（模拟微信 CDN）
+        );
+        t.assert(r2.length === 1, `media 加密对象应解密提取成功，实际 ${r2.length}`);
+        t.assert(r2[0]!.data === png.toString("base64"), "解密后内容应为原始 PNG");
+        t.assert(r2[0]!.mimeType === "image/png", "应推断出 image/png");
+
+        // 3) media 字符串（CDN key）→ CDN 不可达时跳过而非抛错
+        const r3 = await extractAttachments(
+          { item_list: [{ type: 2, image_item: { media: "some/key.png" } }] },
+          base,
+        );
+        t.assert(r3.length === 0, "CDN 不可达时应跳过附件（不抛错）");
+
+        // 4) 非图片响应（HTML 错误页）不应被当作图片
+        const r4 = await extractAttachments(
+          { item_list: [{ type: 2, image_item: { url: `${base}/nope.html` } }] },
+          base,
+        );
+        t.assert(r4.length === 0, "非图片响应应跳过");
+
+        // 5) toImageDownloadRef 规整：url 优先 / media 字符串 / media 对象 / 空
+        t.assert(toImageDownloadRef({ url: "http://x/a.png" })?.url === "http://x/a.png", "url 应直接使用");
+        t.assert(toImageDownloadRef({ media: "k.png" })?.media === "k.png", "media 字符串应识别");
+        const ref = toImageDownloadRef({ media: { encrypt_query_param: "p", aes_key: aesKeyB64 } });
+        t.assert(ref?.queryParam === "p" && ref?.aesKey === aesKeyB64, "media 对象应规整为加密引用");
+        t.assert(toImageDownloadRef({}) === undefined, "空 image_item 应返回 undefined");
+
+        t.log(`url 直链 ✅ / media 加密对象（AES 解密）✅ / media 字符串不可达跳过 ✅ / 非图片跳过 ✅`);
+      } finally {
+        await new Promise<void>((r) => server.close(() => r()));
+      }
+    }),
+  );
+
   // ---------- IM 测试适配器 ----------
   results.push(
     await runCase("U-17", "IM 适配器", "TestAdapter 注入与等待", async (t) => {
