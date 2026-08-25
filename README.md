@@ -58,6 +58,20 @@ npm start
 
 更多接入方式（HTTP / 微信）与配置项见 [docs/usage.md](docs/usage.md)。
 
+## 多模态（图片输入，issue #3）
+
+用户可通过 IM（微信/HTTP）发送图片，图片落盘到 `{dataDir}/uploads/`，随任务派发给 Worker：
+
+```bash
+# 微信：直接发图片即可（自动下载并传图）
+# HTTP：POST /message 携带 attachments（base64）
+curl -X POST http://localhost:8787/message -H 'Content-Type: application/json' -d '{
+  "chatId": "user-1",
+  "text": "看下这张截图里的报错",
+  "attachments": [{"kind": "image", "name": "err.png", "mimeType": "image/png", "data": "<base64>"}]
+}'
+```
+
 ## Coordinator 与 Worker 使用不同模型
 
 默认两者共用 `CIRCLE_MODEL_PROVIDER` / `CIRCLE_MODEL_ID`；可分别覆盖（例如 Coordinator 用文本模型保持快速/低成本，Worker 用更强的执行模型）：
