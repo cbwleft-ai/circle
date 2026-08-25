@@ -14,7 +14,7 @@
  *   也可用 CIRCLE_WEIXIN_BOT_TOKEN 直接指定已登录的 bot token 跳过扫码。
  */
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
-import { createCipheriv, randomBytes, createHash } from "node:crypto";
+import { createCipheriv, createDecipheriv, randomBytes, createHash } from "node:crypto";
 import { join } from "node:path";
 import { log } from "../core/logger.js";
 import type { ChatAttachment, ChatMessage, OutboundFile } from "../core/types.js";
@@ -619,58 +619,151 @@ export class WeixinIlinkAdapter implements ImAdapter {
 /**
  * 从消息中提取图片附件（下载为 base64，issue #3）。失败静默跳过。
  */
-async function extractAttachments(
+/** 图片 item 的下载引用（兼容 url / media 字符串 / media 加密对象三种形式） */
+interface ImageDownloadRef {
+  /** 绝对/相对 URL（image_item.url） */
+  url?: string;
+  /** CDN key（image_item.media 为字符串时） */
+  media?: string;
+  /** CDN 加密下载参数（image_item.media 为对象时的 encrypt_query_param） */
+  queryParam?: string;
+  /** AES-128-ECB 解密密钥（base64，image_item.media 对象的 aes_key） */
+  aesKey?: string;
+}
+
+export async function extractAttachments(
   msg: WeixinMessage,
   baseUrl: string,
   token?: string,
+  cdnBase?: string,
 ): Promise<ChatAttachment[]> {
   const items = msg.item_list ?? [];
   const out: ChatAttachment[] = [];
   for (const item of items) {
-    if (item.type === 2 && item.image_item?.url) {
-      const url = item.image_item.url;
-      const img = await downloadImage(baseUrl, url, token);
-      if (img) {
-        out.push({
-          kind: "image",
-          name: item.image_item.name ?? basenameFromUrl(url),
-          mimeType: img.mimeType,
-          data: img.data,
-        });
-      } else {
-        log.warn("im:weixin", `图片下载失败，跳过附件: ${url.slice(0, 80)}`);
-      }
+    if (item.type !== 2) continue;
+    const ii = item.image_item;
+    if (!ii) continue;
+    const ref = toImageDownloadRef(ii);
+    if (!ref) continue;
+    const img = await downloadImage(baseUrl, ref, token, cdnBase);
+    if (img) {
+      out.push({
+        kind: "image",
+        name: ii.name ?? basenameFromUrl(ref.url ?? ref.media ?? ""),
+        mimeType: img.mimeType,
+        data: img.data,
+      });
+    } else {
+      log.warn("im:weixin", `图片下载失败，跳过附件: ${JSON.stringify(ref).slice(0, 120)}`);
     }
   }
   return out;
 }
 
-async function downloadImage(
-  baseUrl: string,
-  url: string,
-  token?: string,
-): Promise<{ data: string; mimeType?: string } | undefined> {
-  const full = /^https?:\/\//i.test(url)
-    ? url
-    : `${baseUrl.replace(/\/$/, "")}${url.startsWith("/") ? url : `/${url}`}`;
-  // 先按普通 URL 拉取（微信 CDN 多为签名 URL，无需 bot 鉴权），失败再带鉴权头重试
-  for (const headers of [undefined, buildHeaders(token)]) {
-    try {
-      const res = await fetch(full, {
-        headers,
-        signal: AbortSignal.timeout(15000),
-      });
-      if (!res.ok) continue;
-      const buf = Buffer.from(await res.arrayBuffer());
+/** 把 image_item 规整为下载引用：url / media 字符串 / media 对象（encrypt_query_param + aes_key） */
+export function toImageDownloadRef(
+  ii: { url?: string; media?: unknown; [k: string]: unknown },
+): ImageDownloadRef | undefined {
+  if (typeof ii.url === "string" && ii.url.trim()) {
+    return { url: ii.url };
+  }
+  if (typeof ii.media === "string" && ii.media.trim()) {
+    return { media: ii.media };
+  }
+  if (ii.media && typeof ii.media === "object") {
+    const m = ii.media as { encrypt_query_param?: unknown; aes_key?: unknown };
+    if (typeof m.encrypt_query_param === "string" && m.encrypt_query_param.trim()) {
       return {
-        data: buf.toString("base64"),
-        mimeType: res.headers.get("content-type") ?? undefined,
+        queryParam: m.encrypt_query_param,
+        aesKey: typeof m.aes_key === "string" ? m.aes_key : undefined,
       };
-    } catch {
-      /* 尝试下一种方式 */
     }
   }
   return undefined;
+}
+
+async function downloadImage(
+  baseUrl: string,
+  ref: ImageDownloadRef,
+  token?: string,
+  cdnBase?: string,
+): Promise<{ data: string; mimeType?: string } | undefined> {
+  // 候选 URL：url 直链 / CDN 加密下载（多路径尝试）/ CDN key 拼接
+  const candidates: string[] = [];
+  if (ref.url) {
+    candidates.push(
+      /^https?:\/\//i.test(ref.url)
+        ? ref.url
+        : `${baseUrl.replace(/\/$/, "")}${ref.url.startsWith("/") ? ref.url : `/${ref.url}`}`,
+    );
+  }
+  if (ref.queryParam) {
+    const cdn = cdnBase ?? WEIXIN_CDN_BASE_URL;
+    for (const path of ["/download", "/upload", ""]) {
+      candidates.push(`${cdn}${path}?encrypted_query_param=${encodeURIComponent(ref.queryParam)}`);
+    }
+  }
+  if (ref.media) {
+    candidates.push(`${cdnBase ?? WEIXIN_CDN_BASE_URL}/${ref.media.replace(/^\/+/, "")}`);
+  }
+
+  // 依次尝试：先普通拉取（签名 URL 无需鉴权），失败带鉴权头重试；
+  // 有 aes_key 时响应为 AES-128-ECB 密文，尝试解密后校验图片魔数。
+  for (const url of candidates) {
+    for (const headers of [undefined, buildHeaders(token)]) {
+      try {
+        const res = await fetch(url, {
+          headers,
+          signal: AbortSignal.timeout(15000),
+        });
+        if (!res.ok) continue;
+        const buf = Buffer.from(await res.arrayBuffer());
+        const plain = ref.aesKey ? tryDecrypt(buf, ref.aesKey) : undefined;
+        const finalBuf = plain ?? buf;
+        if (!isImageMagic(finalBuf)) continue; // 非图片（如 HTML 错误页）继续尝试下一候选
+        return {
+          data: finalBuf.toString("base64"),
+          mimeType: guessImageMime(finalBuf),
+        };
+      } catch {
+        /* 尝试下一种方式 */
+      }
+    }
+  }
+  return undefined;
+}
+
+/** AES-128-ECB 解密后校验图片魔数，失败返回 undefined */
+function tryDecrypt(buf: Buffer, aesKeyB64: string): Buffer | undefined {
+  try {
+    const key = Buffer.from(aesKeyB64, "base64");
+    if (key.length !== 16) return undefined;
+    const decipher = createDecipheriv("aes-128-ecb", key, null);
+    const plain = Buffer.concat([decipher.update(buf), decipher.final()]);
+    return isImageMagic(plain) ? plain : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
+function isImageMagic(buf: Buffer): boolean {
+  return (
+    buf.length >= 12 &&
+    (buf.subarray(0, 8).equals(PNG_MAGIC) ||
+      (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) ||
+      buf.subarray(0, 3).toString("ascii") === "GIF" ||
+      buf.subarray(0, 4).toString("ascii") === "RIFF")
+  );
+}
+
+function guessImageMime(buf: Buffer): string {
+  if (buf.subarray(0, 8).equals(PNG_MAGIC)) return "image/png";
+  if (buf[0] === 0xff && buf[1] === 0xd8) return "image/jpeg";
+  if (buf.subarray(0, 3).toString("ascii") === "GIF") return "image/gif";
+  if (buf.subarray(0, 4).toString("ascii") === "RIFF") return "image/webp";
+  return "image/jpeg";
 }
 
 function basenameFromUrl(url: string): string | undefined {
