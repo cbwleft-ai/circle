@@ -9,6 +9,7 @@
 #   ./scripts/circle.sh status         # 查看服务状态
 #   ./scripts/circle.sh logs [-f]      # 查看运行日志（-f 跟随）
 #   ./scripts/circle.sh log-file       # 打印数据目录日志文件路径
+#   ./scripts/circle.sh vision-model   # 把 deepseek-v4-flash-vision-exp 注册进 pi 模型目录（多模态）
 #
 # 说明:
 #   - 无 systemd 依赖（兼容不支持 systemctl 用户服务的目标环境）：
@@ -35,6 +36,11 @@ export CIRCLE_IM_ADAPTER="${CIRCLE_IM_ADAPTER:-weixin}"
 export CIRCLE_AGENT_DIR="${CIRCLE_AGENT_DIR:-$HOME/.pi/agent}"
 export CIRCLE_MODEL_PROVIDER="${CIRCLE_MODEL_PROVIDER:-deepseek}"
 export CIRCLE_MODEL_ID="${CIRCLE_MODEL_ID:-deepseek-v4-flash}"
+# Coordinator/Worker 独立模型（默认跟随全局，可分别覆盖）
+export CIRCLE_COORDINATOR_MODEL_PROVIDER="${CIRCLE_COORDINATOR_MODEL_PROVIDER:-$CIRCLE_MODEL_PROVIDER}"
+export CIRCLE_COORDINATOR_MODEL_ID="${CIRCLE_COORDINATOR_MODEL_ID:-$CIRCLE_MODEL_ID}"
+export CIRCLE_WORKER_MODEL_PROVIDER="${CIRCLE_WORKER_MODEL_PROVIDER:-$CIRCLE_MODEL_PROVIDER}"
+export CIRCLE_WORKER_MODEL_ID="${CIRCLE_WORKER_MODEL_ID:-$CIRCLE_MODEL_ID}"
 export CIRCLE_LOG_LEVEL="${CIRCLE_LOG_LEVEL:-info}"
 
 # 是否已有实例在运行（拿不到锁 = 有实例持有）
@@ -51,7 +57,9 @@ start() {
     echo "Circle 已在运行（单实例锁 $LOCK_FILE 被占用）。如需重启请用 restart。"
     return 0
   fi
-  echo "启动 Circle: IM=$CIRCLE_IM_ADAPTER  DATA=$CIRCLE_DATA_DIR  模型=$CIRCLE_MODEL_PROVIDER/$CIRCLE_MODEL_ID"
+  echo "启动 Circle: IM=$CIRCLE_IM_ADAPTER  DATA=$CIRCLE_DATA_DIR"
+  echo "  模型: Coordinator=$CIRCLE_COORDINATOR_MODEL_PROVIDER/$CIRCLE_COORDINATOR_MODEL_ID"
+  echo "        Worker=$CIRCLE_WORKER_MODEL_PROVIDER/$CIRCLE_WORKER_MODEL_ID"
   # 后台启动并持有锁：flock 进程存活期间锁有效，进程退出自动释放。
   # flock -n 是唯一仲裁者——即使与另一个 start 并发，内核也保证只有一个实例拿到锁。
   nohup flock -n "$LOCK_FILE" bash -lc "cd '$CIRCLE_DIR' && exec npm start" \
@@ -117,6 +125,38 @@ log_file() {
   echo "$LOG_FILE"
 }
 
+# 把 deepseek-v4-flash-vision-exp 注册进 pi 模型目录（~/.pi/agent/models.json）。
+# 幂等：已注册则跳过；已存在的其他 provider/模型保留，仅合并追加 vision-exp。
+# 多模态部署前执行一次：./scripts/circle.sh vision-model
+vision_model() {
+  local models_file="$CIRCLE_AGENT_DIR/models.json"
+  mkdir -p "$CIRCLE_AGENT_DIR"
+  node -e '
+    const fs = require("fs");
+    const file = process.argv[1];
+    let base = {};
+    try { base = JSON.parse(fs.readFileSync(file, "utf-8")); } catch {}
+    const providers = base.providers ?? {};
+    const existing = (providers.deepseek?.models ?? []).filter(Boolean);
+    if (existing.some((m) => m.id === "deepseek-v4-flash-vision-exp")) {
+      console.log("vision-exp 已注册，跳过: " + file);
+      process.exit(0);
+    }
+    providers.deepseek = {
+      ...(providers.deepseek ?? {}),
+      baseUrl: providers.deepseek?.baseUrl ?? "https://api.deepseek.com",
+      api: providers.deepseek?.api ?? "openai-completions",
+      models: [
+        ...existing,
+        { id: "deepseek-v4-flash-vision-exp", name: "DeepSeek V4 Flash Vision Exp", input: ["text", "image"], reasoning: true },
+      ],
+    };
+    base.providers = providers;
+    fs.writeFileSync(file, JSON.stringify(base, null, 2) + "\n");
+    console.log("已注册 deepseek-v4-flash-vision-exp → " + file);
+  ' "$models_file"
+}
+
 case "${1:-}" in
   start) start ;;
   stop) stop ;;
@@ -124,8 +164,9 @@ case "${1:-}" in
   status) status ;;
   logs) logs "${2:-}" ;;
   log-file) log_file ;;
+  vision-model) vision_model ;;
   *)
-    echo "用法: $0 {start|stop|restart|status|logs [-f]|log-file}"
+    echo "用法: $0 {start|stop|restart|status|logs [-f]|log-file|vision-model}"
     exit 1
     ;;
 esac
