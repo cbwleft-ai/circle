@@ -252,6 +252,45 @@ export async function runUnitTests(): Promise<TestResult[]> {
     }),
   );
 
+  results.push(
+    await runCase("U-11c", "cron", "指定日期任务（8月24日）次日不再触发：dom/dow Vixie 语义", async (t) => {
+      // 回归：cron "0 10 24 8 *"（每年 8月24日 10:00）。此前无条件 dom||dow，dow=* 恒真
+      // 会把 dom 限定抹掉，导致 8 月每天 10:00 都触发——8月24日触发后 8月25日还会再触发。
+      // 修复后：dow 为 * 时只看 dom，下一次触发应为下一年 8月24日。
+      const fired = new Date(2026, 7, 24, 10, 0, 5); // 2026-08-24 10:00:05 已触发
+      const next = nextRun("0 10 24 8 *", fired, { exclusive: true })!;
+      t.assert(next !== undefined, "应能计算下一次触发");
+      t.assert(
+        next.getFullYear() === 2027 && next.getMonth() === 7 && next.getDate() === 24,
+        `8/24 触发后下次应为下一年 8/24，实际 ${next.toLocaleString("zh-CN")}`,
+      );
+      t.assert(next.getHours() === 10 && next.getMinutes() === 0, `应为 10:00，实际 ${next.toLocaleString("zh-CN")}`);
+      // 8月25日起算（宕机错过/重启）：nextRun 应直接指向下一年 8/24，而不是当月
+      const from25 = new Date(2026, 7, 25, 9, 0, 0);
+      const n25 = nextRun("0 10 24 8 *", from25)!;
+      t.assert(
+        n25.getFullYear() === 2027 && n25.getMonth() === 7 && n25.getDate() === 24,
+        `8/25 起算应指向下一年 8/24，实际 ${n25.toLocaleString("zh-CN")}`,
+      );
+      // matches：只有 8/24 匹配，8/25、8/31 不匹配
+      t.assert(matches("0 10 24 8 *", new Date(2026, 7, 24, 10, 0, 0)), "8/24 10:00 应匹配");
+      t.assert(!matches("0 10 24 8 *", new Date(2026, 7, 25, 10, 0, 0)), "8/25 10:00 不应匹配");
+      t.assert(!matches("0 10 24 8 *", new Date(2026, 7, 31, 10, 0, 0)), "8/31 10:00 不应匹配");
+      // dom=* 时只看 dow（每周五）
+      t.assert(matches("0 10 * * 5", new Date(2026, 7, 28, 10, 0, 0)), "周五应匹配 0 10 * * 5");
+      t.assert(!matches("0 10 * * 5", new Date(2026, 7, 27, 10, 0, 0)), "周四不应匹配 0 10 * * 5");
+      // dom 与 dow 都受限：任一匹配即触发（OR，与 Vixie cron 一致）
+      t.assert(matches("0 10 24 * 5", new Date(2026, 7, 24, 10, 0, 0)), "dom=24 应匹配（OR）");
+      t.assert(matches("0 10 24 * 5", new Date(2026, 7, 28, 10, 0, 0)), "dow=5 周五应匹配（OR）");
+      t.assert(!matches("0 10 24 * 5", new Date(2026, 7, 27, 10, 0, 0)), "周四(非24日)不应匹配");
+      // dow=7 应等价于周日（parseCron 注释「0/7 = 周日」）
+      const sunday = new Date(2026, 7, 30, 10, 0, 0); // 2026-08-30 周日
+      t.assert(matches("0 10 * * 7", sunday), "dow=7 应匹配周日（2026-08-30）");
+      t.assert(matches("0 10 * * 0", sunday), "dow=0 应匹配周日（2026-08-30）");
+      t.log(`nextRun("0 10 24 8 *", 8/24 10:00:05, exclusive) → ${next.toLocaleString("zh-CN")}（下一年 8/24，不再 8/25）`);
+    }),
+  );
+
   // ---------- 任务存储 ----------
   const storeDir = mkdtempSync(join(tmpdir(), "circle-unit-store-"));
   try {
@@ -837,6 +876,55 @@ export async function runUnitTests(): Promise<TestResult[]> {
           after.taskIds.filter((id) => id === "T-race").length <= 1,
           "taskIds 不应重复记录同一 taskId",
         );
+        sched.stop();
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }),
+  );
+
+  results.push(
+    await runCase("U-16c", "Scheduler", "8月24日的任务，8月25日不再触发（指定日期 cron 回归）", async (t) => {
+      const dir = mkdtempSync(join(tmpdir(), "circle-unit-sched-date-"));
+      try {
+        const { SchedulerAgent } = await import("../src/agents/scheduler.js");
+        const store = new ScheduleStore(dir);
+        let fired = 0;
+        const sched = new SchedulerAgent(
+          store,
+          { schedulerTickMs: 1000, cleanupAfterDays: 30, cleanupCron: "0 3 * * *" } as never,
+          {
+            runScheduled: async () => {
+              fired++;
+              return { taskId: "T-date" };
+            },
+            runDailyCleanup: async () => ({ removedTasks: 0, removedWorkspaces: 0 }),
+          },
+        );
+        const s = sched.create({ name: "8月24日任务", cron: "0 10 24 8 *", description: "d", workerName: "dev" });
+
+        // 场景 A：8/24 10:00 已正常触发（模拟 fire 后的落库状态），当前为 8/25，tick 不应再触发
+        store.update(s.id, {
+          lastRunAt: new Date(2026, 7, 24, 10, 0, 0).getTime(),
+          nextRunAt: new Date(2027, 7, 24, 10, 0, 0).getTime(),
+        });
+        await sched.tick();
+        t.assert(fired === 0, "8/25 tick 不应再次触发 8/24 的任务");
+        await sched.tick();
+        t.assert(fired === 0, "再次 tick 仍不应触发");
+
+        // 场景 B：手动 fire 一次后，nextRunAt 应推至 8月24日 10:00（下一年），而非 8/25、8/26；后续 tick 不再触发
+        await sched.fire(s);
+        t.assert(fired === 1, "fire 应触发 1 次");
+        const after = store.get(s.id)!;
+        const next = new Date(after.nextRunAt!);
+        t.assert(
+          next.getMonth() === 7 && next.getDate() === 24 && next.getHours() === 10 && next.getMinutes() === 0,
+          `fire 后 nextRunAt 应为 8月24日 10:00（下一年），实际 ${next.toLocaleString("zh-CN")}`,
+        );
+        t.assert(after.nextRunAt! > Date.now(), "nextRunAt 应在未来");
+        await sched.tick();
+        t.assert(fired === 1, "fire 后 tick 不应重复触发（nextRunAt 已推后）");
         sched.stop();
       } finally {
         rmSync(dir, { recursive: true, force: true });

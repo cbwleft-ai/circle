@@ -84,8 +84,28 @@ function daysInMonth(y: number, m: number): number {
 }
 
 /**
+ * dom 与 dow 的联合判定（Vixie cron 语义）：
+ * - 两者都是 * → 每天都匹配；
+ * - 仅 dom 为 * → 只看 dow；
+ * - 仅 dow 为 * → 只看 dom；
+ * - 两者都受限 → 任一匹配即触发（OR）。
+ *
+ * 回归修复：此前无条件使用 dom||dow，dow=*（恒真）会把 dom 限定完全抹掉，
+ * 导致「0 10 24 8 *」（每年 8月24日）在 8 月每天 10:00 都触发，8月25日会重复触发。
+ * 另外 dow 归一化：0 与 7 均表示周日（parseCron 注释「0/7 = 周日」）。
+ */
+function dayMatches(domField: CronField, dowField: CronField, dom: number, dow: number): boolean {
+  const domOk = domField.values.has(dom);
+  const dowOk = dowField.values.has(dow) || (dow === 0 && dowField.values.has(7));
+  if (domField.wildcard && dowField.wildcard) return true;
+  if (domField.wildcard) return dowOk;
+  if (dowField.wildcard) return domOk;
+  return domOk || dowOk;
+}
+
+/**
  * 计算 cron 在 from（含）之后的下一次触发时间。
- * 注意：dom 与 dow 的关系采用「两者任一匹配即触发」（与 Vixie cron 一致）。
+ * dom/dow 联合判定见 dayMatches（Vixie 语义，非无条件 OR）。
  *
  * opts.exclusive=true 时从 from 的【下一个整分钟】开始扫描，保证返回
  * 严格晚于 from 的匹配——用于 fire 后更新 nextRunAt，避免同一触发点重复触发
@@ -113,10 +133,8 @@ export function nextRun(
     const dow = candidate.getDay(); // 0=周日
 
     const monOk = monField.values.has(m);
-    const domOk = domField.values.has(d);
-    const dowOk = dowField.values.has(dow);
 
-    if (monOk && (domOk || dowOk)) {
+    if (monOk && dayMatches(domField, dowField, d, dow)) {
       if (hourField.values.has(candidate.getHours())) {
         if (minField.values.has(candidate.getMinutes())) {
           return new Date(candidate);
@@ -136,8 +154,7 @@ export function matches(cron: ParsedCron | string, at: Date = new Date()): boole
   return (
     minField.values.has(at.getMinutes()) &&
     hourField.values.has(at.getHours()) &&
-    domField.values.has(at.getDate()) &&
-    monField.values.has(at.getMonth() + 1) &&
-    dowField.values.has(at.getDay())
+    dayMatches(domField, dowField, at.getDate(), at.getDay()) &&
+    monField.values.has(at.getMonth() + 1)
   );
 }
