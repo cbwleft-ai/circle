@@ -9,7 +9,7 @@
  * - 短程任务：执行后直接返回结果；
  * - 长程任务：先返回「任务已收到」（由团队层立即 ack），执行完成后再反馈结果。
  */
-import { mkdirSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   createAgentSession,
@@ -25,12 +25,47 @@ import type { AppConfig } from "../config.js";
 import { log } from "../core/logger.js";
 import { systemTimeBlock } from "../core/time.js";
 import { addUsage, emptyUsage, formatUsage, usageFromAgentMessages } from "../core/usage.js";
-import type { Task, TaskUsage, WorkerConfig } from "../core/types.js";
+import type { Task, TaskAttachment, TaskUsage, WorkerConfig } from "../core/types.js";
 
 const SessionManagerShim = {
   inMemory: () => SessionManager.inMemory(),
   inMemorySettings: () => SettingsManager.inMemory({ compaction: { enabled: false } }),
 };
+
+/**
+ * 模型图片输入（与 pi 的 ImageContent 结构一致，避免直接依赖内部包）
+ */
+export interface WorkerImageInput {
+  type: "image";
+  /** base64 内容 */
+  data: string;
+  mimeType: string;
+}
+
+/**
+ * 读取任务附带的图片为模型图片输入（issue #3）。
+ * 读取失败的文件静默跳过（记录日志），保证单张损坏不阻塞整个任务。
+ */
+export function loadTaskImages(
+  attachments: TaskAttachment[] | undefined,
+  fs: { readFileSync: (p: string) => Buffer } = { readFileSync },
+): WorkerImageInput[] {
+  if (!attachments || attachments.length === 0) return [];
+  const images: WorkerImageInput[] = [];
+  for (const a of attachments) {
+    try {
+      const buf = fs.readFileSync(a.path);
+      images.push({
+        type: "image",
+        data: buf.toString("base64"),
+        mimeType: a.mimeType ?? "image/jpeg",
+      });
+    } catch (e) {
+      log.warn("worker", `读取任务附件失败（${a.path}）: ${(e as Error).message}`);
+    }
+  }
+  return images;
+}
 
 export class WorkerAgent {
   private running = 0;
@@ -130,8 +165,14 @@ export class WorkerAgent {
     }, this.appConfig.taskTimeoutMs);
 
     try {
+      const images = loadTaskImages(task.attachments);
+      const imageNote =
+        images.length > 0
+          ? `\n\n用户附带了 ${images.length} 张图片（已作为图片输入提供），请查看图片内容并按要求处理。`
+          : "";
       await session.prompt(
-        `${systemTimeBlock()}\n请开始执行任务 ${task.id}「${task.title}」。\n执行指令：\n${task.description}`,
+        `${systemTimeBlock()}\n请开始执行任务 ${task.id}「${task.title}」。\n执行指令：\n${task.description}${imageNote}`,
+        images.length > 0 ? { images } : undefined,
       );
     } catch (e) {
       log.error("worker", `[${task.id}] 执行异常: ${(e as Error).message}`);
