@@ -9,6 +9,12 @@ export interface AppConfig {
   longTaskThresholdSec: number;
   /** Coordinator 每 N 轮对话检查一次待办任务状态 */
   statusCheckInterval: number;
+  /**
+   * 附件消息合并窗口（毫秒）：收到图片/文件等附件后，窗口内的后续消息（如描述文本）
+   * 合并为一批，Coordinator 只回复一次。纯文本消息不启动窗口、立即处理（零延迟）。
+   * 0 = 关闭合并，逐条处理。
+   */
+  messageMergeMs: number;
   /** Scheduler 调度 tick 间隔（毫秒） */
   schedulerTickMs: number;
   /** 每日清理：已完成超过该天数（默认 30）的任务及临时工作空间 */
@@ -81,6 +87,7 @@ export function loadConfig(): AppConfig {
     dataDir,
     longTaskThresholdSec: envInt("CIRCLE_LONG_TASK_SEC", 10),
     statusCheckInterval: envInt("CIRCLE_STATUS_CHECK_INTERVAL", 5),
+    messageMergeMs: envInt("CIRCLE_MESSAGE_MERGE_MS", 1500),
     schedulerTickMs: envInt("CIRCLE_SCHEDULER_TICK_MS", 30_000),
     cleanupAfterDays: envInt("CIRCLE_CLEANUP_AFTER_DAYS", 30),
     cleanupCron: env("CIRCLE_CLEANUP_CRON") ?? "0 3 * * *",

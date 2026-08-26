@@ -209,6 +209,7 @@ npm start
 | `CIRCLE_WORKER_THINKING` | `high` | Worker 思考级别 |
 | `CIRCLE_LONG_TASK_SEC` | `10` | 长程任务判定阈值（秒） |
 | `CIRCLE_STATUS_CHECK_INTERVAL` | `5` | Coordinator 每 N 轮检查待办任务 |
+| `CIRCLE_MESSAGE_MERGE_MS` | `1500` | 附件消息合并窗口（毫秒）：收到图片/文件后，窗口内的后续消息合并为一批，Coordinator 只回复一次；纯文本消息零延迟；`0` = 关闭合并 |
 | `CIRCLE_SCHEDULER_TICK_MS` | `30000` | Scheduler tick 间隔（毫秒） |
 | `CIRCLE_CLEANUP_AFTER_DAYS` | `30` | 已完成任务保留天数 |
 | `CIRCLE_CLEANUP_CRON` | `0 3 * * *` | 每日清理时间 |
@@ -284,3 +285,25 @@ Coordinator：（调用 send_artifact 后）已发送：report.md ✓
 > 自动降级为文字提示（附文件名/大小/产出物路径），不阻塞主流程。
 > 微信 iLink 通道支持文件（type 4）与图片（type 2）消息，走官方上传链路
 > （getuploadurl → AES-128-ECB 加密 → CDN → sendmessage）。
+
+## 9. 连续消息合并（照片 + 描述 → 一条回复）
+
+用户在微信中常**先发一张照片、再补一句描述**（如「看下这张截图里的报错」）。若每条消息
+各自触发一轮 Coordinator 回复，会产生多条割裂的回复。
+
+Circle 在团队入口（`AgentTeam.handleUserMessage`，对所有 IM 通道统一生效）内置
+**附件触发的合并窗口（debounce）**：
+
+- **只有携带附件（图片/文件）的消息才启动合并窗口**（`CIRCLE_MESSAGE_MERGE_MS`，
+  默认 `1500`ms）；窗口内到达的后续消息（描述文本、更多图片）归为同一批；
+- 窗口到期后把多条消息**合并为一条**（文本按到达顺序换行拼接、附件全部保留），
+  Coordinator 只处理一轮、只回复一条；
+- **纯文本消息零延迟**：无待合并批次时立即逐条处理，不等待窗口——日常文字对话
+  回复不受任何影响；只有发图后的第一轮可能等待至多一个窗口；
+- 不同会话互不干扰；窗口内新消息到达会重置定时器（真正的突发消息不会拆开）；
+- 合并发生在**安全评估之前**，合并后的完整文本统一过安全拦截，不存在绕过风险；
+- 关闭合并：`export CIRCLE_MESSAGE_MERGE_MS=0`（所有消息立即逐条处理）。
+
+> 注意：附件消息的回复会等待至多一个窗口（等可能跟随的描述）；若描述先发、照片后发，
+> 描述会先被立即回复，照片再独立处理（建议照片在前）。窗口大小可调小以降低等待。
+> 实现见 `src/core/message-merge.ts`（纯函数 `mergeMessages` + `MessageMerger`，可独立测试）。
