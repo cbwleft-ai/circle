@@ -72,6 +72,14 @@ curl -X POST http://localhost:8787/message -H 'Content-Type: application/json' -
 }'
 ```
 
+## 连续消息合并（照片 + 描述 → 一条回复）
+
+用户先发一张照片、再补一句描述时，Circle 会把合并窗口内（默认 1.5s，
+`CIRCLE_MESSAGE_MERGE_MS` 可调，`0` 关闭）同会话的多条消息**合并为一批**，
+Coordinator 只处理一轮、只回复一条；文本按顺序拼接、图片附件全部保留并随任务派发。
+合并窗口**只由附件消息触发**——纯文本消息零延迟、立即回复，日常文字对话不受影响。
+对所有 IM 通道（微信 / HTTP / 控制台）统一生效，实现见 `src/core/message-merge.ts`。
+
 ## Coordinator 与 Worker 使用不同模型
 
 默认两者共用 `CIRCLE_MODEL_PROVIDER` / `CIRCLE_MODEL_ID`；可分别覆盖（例如 Coordinator 用文本模型保持快速/低成本，Worker 用更强的执行模型）：

@@ -1202,6 +1202,123 @@ export async function runUnitTests(): Promise<TestResult[]> {
     }),
   );
 
+  // ---------- 连续消息合并（照片 + 描述等 → 一条回复） ----------
+  results.push(
+    await runCase("U-40", "消息合并", "mergeMessages：合并文本与附件（纯函数）", async (t) => {
+      const { mergeMessages } = await import("../src/core/message-merge.js");
+      // 单条消息：原样返回（不新建对象，引用相等）
+      const single = { chatId: "chat-1", text: "看下这张截图" };
+      t.assert(mergeMessages([single]) === single, "单条消息应原样返回");
+      // 照片（空文本）+ 描述：文本取描述，附件保留
+      const m1 = mergeMessages([
+        { chatId: "chat-1", text: "", attachments: [{ kind: "image", name: "a.png", data: "AAA" }] },
+        { chatId: "chat-1", text: "看下这张截图里的报错" },
+      ]);
+      t.assertEqual(m1.text, "看下这张截图里的报错", "空文本消息应被跳过，文本取描述");
+      t.assert(m1.attachments?.length === 1 && m1.attachments![0]!.data === "AAA", "附件应保留");
+      // 多条文本 + 多条附件：文本换行拼接（trim）、附件按顺序合并
+      const m2 = mergeMessages([
+        { chatId: "chat-2", text: "第一条", attachments: [{ kind: "image", data: "1" }] },
+        { chatId: "chat-2", text: " 第二条 " },
+        { chatId: "chat-2", text: "", attachments: [{ kind: "image", data: "2" }] },
+      ]);
+      t.assertEqual(m2.text, "第一条\n第二条", "多条文本应以换行拼接并 trim");
+      t.assertEqual(m2.attachments?.length, 2, "附件应全部合并");
+      t.assertEqual(m2.attachments![1]!.data, "2", "附件顺序应保持");
+      t.assertEqual(m2.chatId, "chat-2", "chatId 取第一条消息");
+      // 无附件时不应生成空数组
+      const m3 = mergeMessages([{ chatId: "chat-3", text: "a" }, { chatId: "chat-3", text: "b" }]);
+      t.assert(m3.attachments === undefined, "无附件时 attachments 应为 undefined");
+    }),
+  );
+
+  results.push(
+    await runCase("U-41", "消息合并", "MessageMerger：附件启动窗口，窗口内消息合并为一批", async (t) => {
+      const { MessageMerger } = await import("../src/core/message-merge.js");
+      const processed: string[] = [];
+      const merger = new MessageMerger(40, async (msg) => {
+        processed.push(`[${msg.chatId}] ${msg.text} (${(msg.attachments ?? []).length} 附件)`);
+      });
+      // 照片（附件，启动窗口）+ 描述 + 补充：窗口内归为 1 批、只处理 1 次
+      await Promise.all([
+        merger.push({ chatId: "wx:u1", text: "", attachments: [{ kind: "image", data: "A" }] }),
+        merger.push({ chatId: "wx:u1", text: "看下这张截图" }),
+        merger.push({ chatId: "wx:u1", text: "并提取里面的报错" }),
+      ]);
+      t.assert(processed.length === 1, `3 条窗口内消息应合并为 1 批处理，实际 ${processed.length} 批`);
+      t.assert(
+        processed[0] === "[wx:u1] 看下这张截图\n并提取里面的报错 (1 附件)",
+        `合并后文本/附件应为照片+描述，实际: ${processed[0]}`,
+      );
+      t.assert(merger.pendingCount === 0, "处理完成后不应有待合并批次");
+      // 窗口关闭后：纯文本无待合并批次 → 立即逐条处理（不启动新窗口）
+      await Promise.all([
+        merger.push({ chatId: "wx:u2", text: "你好" }),
+        merger.push({ chatId: "wx:u1", text: "再发一条" }),
+      ]);
+      t.assert(processed.length === 3, `窗口外纯文本应逐条立即处理（累计 3 批），实际 ${processed.length} 批`);
+      // flushAll 幂等：无待合并批次时不再处理
+      await merger.flushAll();
+      t.assert(processed.length === 3, "flushAll 后不应有额外处理");
+    }),
+  );
+
+  results.push(
+    await runCase("U-43", "消息合并", "纯文本消息零延迟：不等待合并窗口，附件后到则分开处理", async (t) => {
+      const { MessageMerger } = await import("../src/core/message-merge.js");
+      const processed: string[] = [];
+      const merger = new MessageMerger(500, async (msg) => {
+        processed.push(msg.text);
+      });
+      // 1) 纯文本消息：应立即处理（远小于合并窗口，零延迟）
+      const t0 = Date.now();
+      await merger.push({ chatId: "c1", text: "你好" });
+      const elapsed = Date.now() - t0;
+      t.assert(processed.length === 1, "纯文本应被立即处理");
+      t.assert(elapsed < 500, `纯文本不应等待合并窗口（实际等待 ${elapsed}ms）`);
+      // 2) 描述先于照片（窗口内到达）：描述已立即处理，照片自己启动窗口（共 2 批）
+      await Promise.all([
+        merger.push({ chatId: "c1", text: "看下这张截图里的报错" }),
+        merger.push({ chatId: "c1", text: "", attachments: [{ kind: "image", data: "B" }] }),
+      ]);
+      t.assert(processed.length === 3, `描述先到时不应把已处理的描述拉回合并（累计 3 批），实际 ${processed.length} 批`);
+      t.assert(merger.pendingCount === 0, "照片批次处理完成后无待合并批次");
+      // 3) 附件消息自身：窗口到期后才处理（等待可能跟随的描述）
+      const t1 = Date.now();
+      await merger.push({ chatId: "c2", text: "", attachments: [{ kind: "image", data: "C" }] });
+      const waited = Date.now() - t1;
+      t.assert(waited >= 500, `附件消息应等待窗口到期再处理（实际等待 ${waited}ms）`);
+    }),
+  );
+
+  results.push(
+    await runCase("U-42", "消息合并", "MessageMerger：窗口=0 时逐条立即处理（合并关闭）", async (t) => {
+      const { MessageMerger } = await import("../src/core/message-merge.js");
+      const processed: string[] = [];
+      const merger = new MessageMerger(0, async (msg) => {
+        processed.push(msg.text);
+      });
+      await Promise.all([
+        merger.push({ chatId: "chat", text: "第一条" }),
+        merger.push({ chatId: "chat", text: "第二条" }),
+      ]);
+      t.assertEqual(processed.length, 2, "窗口=0 应逐条立即处理");
+      t.assertEqual(processed.join("/"), "第一条/第二条", "处理顺序应保持到达顺序");
+      t.assert(merger.pendingCount === 0, "无待合并批次");
+      // 处理回调抛错时，push 返回的 Promise 应 reject（错误向上传递）
+      const failing = new MessageMerger(0, async () => {
+        throw new Error("处理失败");
+      });
+      let caught = false;
+      try {
+        await failing.push({ chatId: "chat", text: "x" });
+      } catch {
+        caught = true;
+      }
+      t.assert(caught, "处理失败应向上抛给 push 调用方");
+    }),
+  );
+
   // ---------- IM 测试适配器 ----------
   results.push(
     await runCase("U-17", "IM 适配器", "TestAdapter 注入与等待", async (t) => {

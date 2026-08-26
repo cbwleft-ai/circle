@@ -21,6 +21,7 @@ import { TaskStore } from "../core/task-store.js";
 import { UsageStore } from "../core/usage.js";
 import { formatBytes, summarizeText } from "../core/text.js";
 import { AttachmentStore, buildMessageWithAttachments } from "../core/upload.js";
+import { MessageMerger } from "../core/message-merge.js";
 import type {
   ChatMessage,
   DispatchResult,
@@ -70,6 +71,11 @@ export class AgentTeam implements TeamGateway {
    * 支持「请描述刚才那张图」这类不带图的追问）。
    */
   private readonly pendingAttachments = new Map<string, TaskAttachment[]>();
+  /**
+   * 连续消息合并器：同一会话合并窗口内的多条消息（如照片 + 描述）归为一批，
+   * Coordinator 只回一轮，避免每条消息各回一条造成割裂。
+   */
+  private readonly messageMerger: MessageMerger;
 
   /** 异步工厂：创建共享 ModelRuntime（读取 agentDir 的 auth.json / models.json） */
   static async create(opts: AgentTeamOptions): Promise<AgentTeam> {
@@ -100,6 +106,9 @@ export class AgentTeam implements TeamGateway {
     });
     this.outbox = opts.outbox;
     this.sendFile = opts.sendFile;
+    this.messageMerger = new MessageMerger(this.config.messageMergeMs, (merged) =>
+      this.processMerged(merged),
+    );
   }
 
   private outbox: (chatId: string, text: string) => Promise<void>;
@@ -155,6 +164,10 @@ export class AgentTeam implements TeamGateway {
   }
 
   async stop(): Promise<void> {
+    // 丢弃尚未到合并窗口的待处理消息（正常退出场景），避免悬挂定时器
+    const pending = this.messageMerger.pendingCount;
+    this.messageMerger.dispose();
+    if (pending > 0) log.warn("team", `停止时丢弃 ${pending} 个待合并消息批次`);
     this.scheduler.stop();
     await this.coordinator.dispose();
     log.info("team", "AgentTeam 已停止");
@@ -162,9 +175,21 @@ export class AgentTeam implements TeamGateway {
 
   // ============ IM 入口 ============
 
-  /** 用户消息入口（由 IM 适配器回调） */
+  /**
+   * 用户消息入口（由 IM 适配器回调）。
+   * 经 MessageMerger 合并：同会话窗口内多条连续消息（照片 + 描述等）合并为一批，
+   * Coordinator 只回复一次；窗口为 0（CIRCLE_MESSAGE_MERGE_MS=0）时退化为逐条处理。
+   */
   async handleUserMessage(msg: ChatMessage): Promise<void> {
     this.currentChatId = msg.chatId;
+    await this.messageMerger.push(msg);
+  }
+
+  /**
+   * 处理一批（合并后）用户消息：附件落盘 → 安全评估 → Coordinator → 状态检查。
+   * 由 MessageMerger 在合并窗口到期后调用（合并关闭时逐条调用）。
+   */
+  private async processMerged(msg: ChatMessage): Promise<void> {
     this.turnCount++;
 
     // 0) 多模态：保存图片/文件附件并把本地路径注入消息文本（issue #3）
