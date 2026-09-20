@@ -17,9 +17,21 @@ export class TestAdapter implements ImAdapter {
   async start(): Promise<void> {}
   async stop(): Promise<void> {}
 
-  /** 测试注入上行消息（可携带附件，issue #3） */
-  async inject(chatId: string, text: string, attachments?: ChatAttachment[]): Promise<void> {
-    this.handler?.({ chatId, text, attachments });
+  /** 测试注入上行消息（可携带附件与发送者归因，issue #3 / #53） */
+  async inject(
+    chatId: string,
+    text: string,
+    attachments?: ChatAttachment[],
+    opts?: { chatType?: ChatMessage["chatType"]; senderId?: string; senderName?: string },
+  ): Promise<void> {
+    this.handler?.({
+      chatId,
+      chatType: opts?.chatType,
+      senderId: opts?.senderId,
+      senderName: opts?.senderName,
+      text,
+      attachments,
+    });
   }
 
   async send(chatId: string, text: string): Promise<void> {

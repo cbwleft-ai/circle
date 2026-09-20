@@ -80,7 +80,13 @@ export class WechatAdapter implements ImAdapter {
             return;
           }
         }
-        this.handler?.({ chatId, text });
+        this.handler?.({
+          chatId,
+          chatType: room ? "group" : "dm",
+          senderId: contact.id,
+          senderName: contact.name(),
+          text,
+        });
       } catch (e) {
         log.error("im:wechat", `消息处理异常: ${(e as Error).message}`);
       }

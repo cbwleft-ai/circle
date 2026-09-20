@@ -40,10 +40,13 @@ export class HttpAdapter implements ImAdapter {
     }
     if (req.method === "POST" && url.pathname === "/message") {
       const body = await readBody(req);
-      const { chatId, text, attachments } = JSON.parse(body) as {
+      const { chatId, text, attachments, chatType, senderId, senderName } = JSON.parse(body) as {
         chatId?: string;
         text?: string;
         attachments?: ChatAttachment[];
+        chatType?: ChatMessage["chatType"];
+        senderId?: string;
+        senderName?: string;
       };
       if (!chatId || (!text && !(attachments && attachments.length > 0))) {
         writeJson(res, 400, { ok: false, error: "需要 chatId 与 text/attachments 字段" });
@@ -52,7 +55,7 @@ export class HttpAdapter implements ImAdapter {
       // 异步处理，立即返回 202
       const cb = this.handler;
       if (cb) {
-        setImmediate(() => cb({ chatId, text: text ?? "", attachments }));
+        setImmediate(() => cb({ chatId, chatType, senderId, senderName, text: text ?? "", attachments }));
       }
       writeJson(res, 202, { ok: true, received: true });
       return;

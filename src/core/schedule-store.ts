@@ -59,6 +59,8 @@ export class ScheduleStore {
       runAt: input.runAt,
       description: input.description,
       workerName: input.workerName,
+      ownerChatId: input.ownerChatId,
+      createdBy: input.createdBy,
       enabled: input.enabled ?? true,
       createdAt: Date.now(),
       lastRunAt: input.lastRunAt,
@@ -102,8 +104,10 @@ export class ScheduleStore {
     this.persist();
   }
 
-  summarize(): string {
-    const list = this.list();
+  summarize(filter?: { ownerChatId?: string; legacyOwnerChatId?: string }): string {
+    const list = filter?.ownerChatId
+      ? this.list().filter((s) => (s.ownerChatId ?? filter.legacyOwnerChatId) === filter.ownerChatId)
+      : this.list();
     if (list.length === 0) return "暂无定时任务。";
     return list
       .map((s) => {

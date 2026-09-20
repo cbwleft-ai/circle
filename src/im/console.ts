@@ -24,7 +24,7 @@ export class ConsoleAdapter implements ImAdapter {
       if (text === "/quit" || text === "/exit") {
         process.exit(0);
       }
-      this.handler?.({ chatId: "console", text });
+      this.handler?.({ chatId: "console", chatType: "dm", senderId: "console", senderName: "本地用户", text });
     });
     log.info("im:console", "控制台模式已启动。输入消息与 Coordinator 对话，输入 /quit 退出。");
   }

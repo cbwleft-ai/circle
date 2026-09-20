@@ -131,12 +131,18 @@ export class SchedulerAgent {
     at?: string;
     description: string;
     workerName: string;
+    /** 创建者所在会话（触发结果回流；缺省回落到默认会话） */
+    ownerChatId?: string;
+    /** 创建者用户 id（归因用，可选） */
+    createdBy?: string;
   }): ScheduledTask {
     const timing = this.resolveTiming(input);
     const s = this.store.create({
       name: input.name,
       description: input.description,
       workerName: input.workerName,
+      ownerChatId: input.ownerChatId,
+      createdBy: input.createdBy,
       enabled: true,
       taskIds: [],
       ...timing,

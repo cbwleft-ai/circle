@@ -419,6 +419,8 @@ export class WeixinIlinkAdapter implements ImAdapter {
     log.info("im:weixin", `转发给团队 → ${fromUserId}: ${text.slice(0, 200)}${attachments.length > 0 ? `（附件 ${attachments.length} 个）` : ""}`);
     this.handler?.({
       chatId: `wx:${fromUserId}`,
+      chatType: "dm",
+      senderId: fromUserId,
       text,
       attachments: attachments.length > 0 ? attachments : undefined,
     });

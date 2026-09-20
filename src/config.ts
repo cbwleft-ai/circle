@@ -28,6 +28,14 @@ export interface AppConfig {
   cleanupCron: string;
   /** 单任务执行超时（毫秒） */
   taskTimeoutMs: number;
+  /** Coordinator 会话池上限（活跃会话数，默认 64） */
+  maxCoordinatorSessions: number;
+  /** Coordinator 会话池空闲回收 TTL（毫秒，默认 2 小时） */
+  coordinatorSessionTtlMs: number;
+  /** 无归属任务/定时任务回流使用的默认会话（默认 console） */
+  defaultChatId: string;
+  /** 管理员会话列表：可跨会话查看任务与产出物（默认空） */
+  adminChatIds: string[];
   /** pi agentDir（模型/凭据配置目录，默认 ~/.pi/agent） */
   agentDir: string;
   /** 模型 provider */
@@ -98,6 +106,13 @@ export function loadConfig(): AppConfig {
     cleanupAfterDays: envInt("CIRCLE_CLEANUP_AFTER_DAYS", 30),
     cleanupCron: env("CIRCLE_CLEANUP_CRON") ?? "0 3 * * *",
     taskTimeoutMs: envInt("CIRCLE_TASK_TIMEOUT_MS", 30 * 60 * 1000),
+    maxCoordinatorSessions: envInt("CIRCLE_MAX_COORDINATOR_SESSIONS", 64),
+    coordinatorSessionTtlMs: envInt("CIRCLE_COORDINATOR_SESSION_TTL_MS", 2 * 60 * 60 * 1000),
+    defaultChatId: env("CIRCLE_DEFAULT_CHAT_ID") ?? "console",
+    adminChatIds: (env("CIRCLE_ADMIN_CHAT_IDS") ?? "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean),
     agentDir: env("CIRCLE_AGENT_DIR") ?? process.env.HOME + "/.pi/agent",
     modelProvider: env("CIRCLE_MODEL_PROVIDER") ?? "deepseek",
     modelId: env("CIRCLE_MODEL_ID") ?? "deepseek-v4-flash",

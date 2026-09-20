@@ -53,8 +53,10 @@ export interface Task {
   requestedBy: "user" | "scheduler";
   /** 若由定时任务触发，记录 schedule id */
   scheduleId?: string;
-  /** 发起对话的 chatId（用于异步结果汇报） */
+  /** 发起对话的 chatId（用于异步结果汇报与数据归属隔离） */
   requestChatId?: string;
+  /** 发起消息的发送者 id（归因用，可选） */
+  requestSenderId?: string;
   /** 用户附带的图片/文件（落盘路径），Worker 执行时作为图片输入传给模型（issue #3） */
   attachments?: TaskAttachment[];
   createdAt: number;
@@ -89,6 +91,10 @@ export interface ScheduledTask {
   description: string;
   /** 执行该任务的 Worker 名称 */
   workerName: string;
+  /** 创建者所在会话（定时任务触发结果回流；缺省回落到默认会话） */
+  ownerChatId?: string;
+  /** 创建者用户 id（归因用，可选） */
+  createdBy?: string;
   enabled: boolean;
   createdAt: number;
   lastRunAt?: number;
@@ -117,9 +123,18 @@ export interface WorkerConfig {
   modelId?: string;
 }
 
+/** 会话类型：dm=单聊；group=群聊（群内多成员共享会话，消息按 sender 归因） */
+export type ChatType = "dm" | "group";
+
 /** 对话消息（IM 层与团队层之间的统一结构） */
 export interface ChatMessage {
   chatId: string;
+  /** 会话类型；缺省视为 dm（兼容旧适配器） */
+  chatType?: ChatType;
+  /** 发送者稳定 id（归因用；缺省时下游以 chatId 兜底，见 issue #53） */
+  senderId?: string;
+  /** 发送者展示名（仅用于提示词归因，不落存储） */
+  senderName?: string;
   text: string;
   /** 附带附件（图片/文件），base64 内容或本地路径，由 IM 适配器提供（issue #3） */
   attachments?: ChatAttachment[];

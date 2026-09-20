@@ -28,8 +28,15 @@ import { systemTimeBlock } from "../core/time.js";
 import type { ScheduledTask } from "../core/types.js";
 import type { TeamGateway } from "../team/gateway.js";
 
+/** 会话池条目：一个会话（私聊/群聊）对应一个内存 AgentSession */
+interface PooledSession {
+  session: AgentSession;
+  /** 最近活跃时间（用于 TTL 回收与 LRU 驱逐） */
+  lastActiveAt: number;
+}
+
 export class CoordinatorAgent {
-  session?: AgentSession;
+  private readonly sessions = new Map<string, PooledSession>();
   private readonly gateway: TeamGateway;
 
   constructor(
@@ -41,16 +48,18 @@ export class CoordinatorAgent {
   }
 
   async start(): Promise<void> {
-    const loader = new DefaultResourceLoader({
-      cwd: process.cwd(),
-      agentDir: this.config.agentDir,
-      noExtensions: true,
-      noThemes: true,
-      noPromptTemplates: true,
-      systemPromptOverride: () => this.buildSystemPrompt(),
-    });
-    await loader.reload();
+    // 只校验模型可用；会话按会话（chatId）惰性创建，见 sessionFor()
+    const model = this.coordinatorModel();
+    if (this.config.maxCoordinatorSessions <= 0 || this.config.coordinatorSessionTtlMs <= 0) {
+      throw new Error("Coordinator 会话池配置无效：maxCoordinatorSessions / coordinatorSessionTtlMs 必须 > 0");
+    }
+    log.info(
+      "coordinator",
+      `Coordinator 就绪（模型 ${model.id}，会话池上限 ${this.config.maxCoordinatorSessions}，空闲 TTL ${this.config.coordinatorSessionTtlMs}ms）`,
+    );
+  }
 
+  private coordinatorModel() {
     const model = this.modelRuntime.getModel(
       this.config.coordinatorModelProvider,
       this.config.coordinatorModelId,
@@ -60,20 +69,88 @@ export class CoordinatorAgent {
         `Coordinator 模型 ${this.config.coordinatorModelProvider}/${this.config.coordinatorModelId} 未找到，请检查 models.json 或环境配置`,
       );
     }
+    return model;
+  }
 
+  /** 当前活跃会话数（测试/观测用） */
+  get activeSessionCount(): number {
+    return this.sessions.size;
+  }
+
+  /**
+   * 获取（或惰性创建）指定会话的 Coordinator 会话。
+   * 同一 chatId 的并发安全由 AgentTeam 的每会话串行队列保证；
+   * 工具通过闭包绑定 chatId（不接受 LLM 传入的会话 id）。
+   */
+  private async sessionFor(chatId: string): Promise<AgentSession> {
+    this.sweepIdleSessions();
+    const pooled = this.sessions.get(chatId);
+    if (pooled) {
+      pooled.lastActiveAt = Date.now();
+      return pooled.session;
+    }
+    this.evictLruIfNeeded();
+
+    const loader = new DefaultResourceLoader({
+      cwd: process.cwd(),
+      agentDir: this.config.agentDir,
+      noExtensions: true,
+      noThemes: true,
+      noPromptTemplates: true,
+      systemPromptOverride: () => this.buildSystemPrompt(),
+    });
+    await loader.reload();
+    const model = this.coordinatorModel();
     const { session } = await createAgentSession({
       model,
       modelRuntime: this.modelRuntime,
       thinkingLevel: this.config.coordinatorThinkingLevel,
       // 关键安全设计：不启用任何内置执行工具，仅保留自定义工具
       noTools: "builtin",
-      customTools: this.buildTools(),
+      customTools: this.buildTools(chatId),
       resourceLoader: loader,
       sessionManager: SessionManagerShim.inMemory(),
       settingsManager: SessionManagerShim.inMemorySettings(),
     });
-    this.session = session;
-    log.info("coordinator", `Coordinator 就绪（模型 ${model.id}）`);
+    this.sessions.set(chatId, { session, lastActiveAt: Date.now() });
+    log.info(
+      "coordinator",
+      `为会话 ${chatId} 创建 Coordinator 会话（当前 ${this.sessions.size}/${this.config.maxCoordinatorSessions}）`,
+    );
+    return session;
+  }
+
+  /** 回收超过空闲 TTL 的会话，避免会话数随会话数量无限增长 */
+  private sweepIdleSessions(): void {
+    const ttl = this.config.coordinatorSessionTtlMs;
+    if (ttl <= 0) return;
+    const now = Date.now();
+    for (const [chatId, pooled] of this.sessions) {
+      if (now - pooled.lastActiveAt > ttl) {
+        pooled.session.dispose();
+        this.sessions.delete(chatId);
+        log.info("coordinator", `空闲回收 Coordinator 会话 ${chatId}`);
+      }
+    }
+  }
+
+  /** 达到会话池上限时按 LRU 驱逐最久未活跃的会话 */
+  private evictLruIfNeeded(): void {
+    const max = Math.max(1, this.config.maxCoordinatorSessions);
+    while (this.sessions.size >= max) {
+      let oldestKey: string | undefined;
+      let oldestAt = Number.POSITIVE_INFINITY;
+      for (const [chatId, pooled] of this.sessions) {
+        if (pooled.lastActiveAt < oldestAt) {
+          oldestAt = pooled.lastActiveAt;
+          oldestKey = chatId;
+        }
+      }
+      if (!oldestKey) return;
+      this.sessions.get(oldestKey)!.session.dispose();
+      this.sessions.delete(oldestKey);
+      log.warn("coordinator", `会话池已满，LRU 驱逐 Coordinator 会话 ${oldestKey}（会话内上下文丢失，任务状态不受影响）`);
+    }
   }
 
   /** 系统提示词：角色定义 + 安全边界 + 协作规则 */
@@ -133,6 +210,11 @@ ${workers || "- （暂无 Worker）"}
    （只读、路径受限），不授予任何写权限，也不能访问产出物目录以外的文件；
    产出物中不应包含真实密钥/密码等敏感值。
 
+## 多会话隔离（重要）
+- 你可能同时服务多个会话（私聊/群聊），每个会话的上下文互相独立；
+- 不要引用其它会话的内容或任务；任务与产出物只属于当前会话；
+- 群聊消息可能带「[昵称]」前缀（表示发言成员），可直接称呼对方。
+
 ## 沟通风格
 - 简洁、结构化，使用中文；
 - 长程任务先确认收到，再跟进；
@@ -140,7 +222,7 @@ ${workers || "- （暂无 Worker）"}
   }
 
   /** 自定义工具：Coordinator 与团队交互的唯一通道 */
-  private buildTools() {
+  private buildTools(chatId: string) {
     const g = this.gateway;
     return [
       defineTool({
@@ -157,6 +239,7 @@ ${workers || "- （暂无 Worker）"}
         }),
         execute: async (_id, params) => {
           const res = await g.dispatch(
+            chatId,
             params.worker,
             params.title,
             params.description,
@@ -190,6 +273,7 @@ ${workers || "- （暂无 Worker）"}
         execute: async (_id, params) => {
           try {
             const s = g.createSchedule(
+              chatId,
               params.name,
               { cron: params.cron, at: params.at },
               params.description,
@@ -238,7 +322,7 @@ ${workers || "- （暂无 Worker）"}
             if (params.description !== undefined) patch.description = params.description;
             if (params.worker !== undefined) patch.workerName = params.worker;
             if (params.enabled !== undefined) patch.enabled = params.enabled;
-            const s = g.updateSchedule(params.id, patch);
+            const s = g.updateSchedule(chatId, params.id, patch);
             if (!s) return { content: [{ type: "text", text: `未找到定时任务 ${params.id}` }], details: {} };
             const when = s.kind === "once" ? `触发时间 ${s.runAt}` : `cron "${s.cron}"`;
             return {
@@ -263,16 +347,20 @@ ${workers || "- （暂无 Worker）"}
           id: Type.String({ description: "定时任务 id" }),
         }),
         execute: async (_id, params) => {
-          const ok = g.deleteSchedule(params.id);
-          return {
-            content: [
-              {
-                type: "text",
-                text: ok ? `定时任务 ${params.id} 已删除。` : `未找到定时任务 ${params.id}。`,
-              },
-            ],
-            details: {},
-          };
+          try {
+            const ok = g.deleteSchedule(chatId, params.id);
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: ok ? `定时任务 ${params.id} 已删除。` : `未找到定时任务 ${params.id}。`,
+                },
+              ],
+              details: {},
+            };
+          } catch (e) {
+            return { content: [{ type: "text", text: `删除失败：${(e as Error).message}` }], details: {} };
+          }
         },
       }),
       defineTool({
@@ -285,7 +373,7 @@ ${workers || "- （暂无 Worker）"}
           ),
         }),
         execute: async (_id, params) => {
-          const text = g.listTasks(params.status as never);
+          const text = g.listTasks(chatId, params.status as never);
           return { content: [{ type: "text", text }], details: {} };
         },
       }),
@@ -295,7 +383,7 @@ ${workers || "- （暂无 Worker）"}
         description: "查询全部定时任务。",
         parameters: Type.Object({}),
         execute: async () => {
-          const text = g.listSchedules();
+          const text = g.listSchedules(chatId);
           return { content: [{ type: "text", text }], details: {} };
         },
       }),
@@ -322,7 +410,7 @@ ${workers || "- （暂无 Worker）"}
           taskId: Type.String({ description: "任务编号，如 T-20250813-0001" }),
         }),
         execute: async (_id, params) => {
-          const text = g.getTaskResult(params.taskId);
+          const text = g.getTaskResult(chatId, params.taskId);
           if (!text) {
             return {
               content: [{ type: "text", text: `任务 ${params.taskId} 不存在或暂无结果。` }],
@@ -342,7 +430,7 @@ ${workers || "- （暂无 Worker）"}
           taskId: Type.String({ description: "任务编号，如 T-20250813-0001" }),
         }),
         execute: async (_id, params) => {
-          const text = g.listArtifacts(params.taskId);
+          const text = g.listArtifacts(chatId, params.taskId);
           return { content: [{ type: "text", text }], details: {} };
         },
       }),
@@ -357,7 +445,7 @@ ${workers || "- （暂无 Worker）"}
           path: Type.String({ description: "产出物目录内的相对文件路径（来自 list_artifacts）" }),
         }),
         execute: async (_id, params) => {
-          const text = g.readArtifact(params.taskId, params.path);
+          const text = g.readArtifact(chatId, params.taskId, params.path);
           return { content: [{ type: "text", text }], details: {} };
         },
       }),
@@ -375,16 +463,23 @@ ${workers || "- （暂无 Worker）"}
           ),
         }),
         execute: async (_id, params) => {
-          const res = await g.sendArtifact(params.taskId, params.path, params.caption);
+          const res = await g.sendArtifact(chatId, params.taskId, params.path, params.caption);
           return { content: [{ type: "text", text: res.message }], details: {} };
         },
       }),
     ];
   }
 
-  /** 让 Coordinator 处理一轮输入，返回其完整文本回复 */
-  async respond(input: string): Promise<string> {
-    const session = this.requireSession();
+  /** 让指定会话的 Coordinator 处理一轮输入，返回其完整文本回复 */
+  async respond(chatId: string, input: string): Promise<string> {
+    let session: AgentSession;
+    try {
+      session = await this.sessionFor(chatId);
+    } catch (e) {
+      const err = (e as Error).message;
+      log.warn("coordinator", `[${chatId}] 会话创建失败: ${err}`);
+      return `（Coordinator 处理异常：${err}）`;
+    }
     const chunks: string[] = [];
     const unsubscribe = session.subscribe((event) => {
       if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
@@ -395,21 +490,22 @@ ${workers || "- （暂无 Worker）"}
       await session.prompt(`${systemTimeBlock()}\n${input}`);
     } catch (e) {
       const err = (e as Error).message;
-      log.warn("coordinator", `本轮回复异常: ${err}`);
+      log.warn("coordinator", `[${chatId}] 本轮回复异常: ${err}`);
       unsubscribe();
       return `（Coordinator 处理异常：${err}）`;
     }
     unsubscribe();
+    const pooled = this.sessions.get(chatId);
+    if (pooled) pooled.lastActiveAt = Date.now();
     return chunks.join("").trim();
   }
 
-  private requireSession(): AgentSession {
-    if (!this.session) throw new Error("Coordinator 尚未启动");
-    return this.session;
-  }
-
   async dispose(): Promise<void> {
-    this.session?.dispose();
+    for (const [chatId, pooled] of this.sessions) {
+      pooled.session.dispose();
+      log.info("coordinator", `释放 Coordinator 会话 ${chatId}`);
+    }
+    this.sessions.clear();
   }
 }
 

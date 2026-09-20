@@ -120,11 +120,15 @@ export interface ImAdapter {
 2. `src/core/task-store.ts` 增加对应状态流转方法；
 3. Coordinator 系统提示词/工具描述补充说明。
 
-### 4.2 想支持多会话（多个用户互不干扰）
+### 4.2 会话隔离（issue #53，已实现）
 
-当前为单会话设计（所有对话共享 Coordinator 上下文）。
-如需多会话：为每个 chatId 建立独立 `CoordinatorAgent` 实例并放入映射，
-`AgentTeam.handleUserMessage` 按 `msg.chatId` 路由（参考 `worker.ts` 的按任务建会话模式）。
+Coordinator 现在按 chatId 维护会话池：会话内串行、会话间并行，空闲 TTL / LRU 回收
+（`CIRCLE_COORDINATOR_SESSION_TTL_MS` / `CIRCLE_MAX_COORDINATOR_SESSIONS`）。
+任务、定时任务、产出物均带 `requestChatId` / `ownerChatId` 归属，工具读取时校验
+（`CIRCLE_ADMIN_CHAT_IDS` 可跨会话查看）。
+
+剩余工作（issue #53 P2/P3）：会话持久化（`data/sessions/<chatKey>/`）、每会话配额限流、
+群聊 @ 触发策略与飞书群适配（见 #54）。
 
 ### 4.3 想持久化会话历史
 
