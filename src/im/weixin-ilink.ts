@@ -17,6 +17,7 @@ import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { createCipheriv, createDecipheriv, randomBytes, createHash } from "node:crypto";
 import { join } from "node:path";
 import { log } from "../core/logger.js";
+import { localTimestamp } from "../core/time.js";
 import type { ChatAttachment, ChatMessage, OutboundFile } from "../core/types.js";
 import type { ImAdapter } from "./adapter.js";
 
@@ -335,7 +336,7 @@ export class WeixinIlinkAdapter implements ImAdapter {
       : {};
     writeFileSync(
       this.accountPath(accountId),
-      JSON.stringify({ ...existing, ...data, savedAt: new Date().toISOString() }, null, 2),
+      JSON.stringify({ ...existing, ...data, savedAt: localTimestamp() }, null, 2),
       "utf-8",
     );
     const index = join(dir, "accounts.json");

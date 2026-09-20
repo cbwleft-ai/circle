@@ -105,6 +105,10 @@ Coordinator：⏰ S-XXX 提交材料提醒（一次性: 2026-9-14 09:00，Worker
 > 一次性任务触发一次后自动停用（状态变「已触发」）；若进程宕机错过触发时刻，宽限期内
 > （默认 10 分钟，`CIRCLE_ONCE_GRACE_MS` 可调）补触发一次，超期标记“已错过”不再执行。
 
+> 时区：定时任务与系统时间注入均按【进程本地时区】解释（`0 9 * * *` = 本地 09:00）。
+> 可用 `TZ=Asia/Shanghai npm start` 或 `CIRCLE_TZ=Asia/Shanghai ./scripts/circle.sh restart` 显式指定；
+> 启动日志会打印当前时区，UTC 环境会提示偏差风险。日志时间戳同样为本地时区（带偏移）。
+
 ### 3.5 任务状态查询
 
 ```
@@ -237,6 +241,7 @@ npm start
 | `CIRCLE_WORKERS` | - | Worker 配置 JSON 数组（见下） |
 | `WECHAT_PUPPET` / `WECHAT_PUPPET_TOKEN` / `WECHAT_ALLOW_CONTACTS` | - | 微信适配器配置 |
 | `CIRCLE_LOG_LEVEL` | `info` | 日志级别 debug/info/warn/error |
+| `CIRCLE_TZ` | 系统时区 | 仅 `scripts/circle.sh` 使用：导出为 `TZ`（影响系统时间注入与 cron 解释）。UTC 容器部署建议设为 `Asia/Shanghai` |
 
 ## 7. 配置多个 Worker
 
