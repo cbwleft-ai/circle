@@ -43,6 +43,13 @@ export CIRCLE_WORKER_MODEL_PROVIDER="${CIRCLE_WORKER_MODEL_PROVIDER:-$CIRCLE_MOD
 export CIRCLE_WORKER_MODEL_ID="${CIRCLE_WORKER_MODEL_ID:-$CIRCLE_MODEL_ID}"
 export CIRCLE_LOG_LEVEL="${CIRCLE_LOG_LEVEL:-info}"
 
+# 时区（可选）：TZ 必须在 Node 进程启动前设置才生效，因此通过 CIRCLE_TZ 传入。
+# 例：CIRCLE_TZ=Asia/Shanghai ./scripts/circle.sh restart
+# 不设置则沿用系统时区；启动日志会打印实际生效时区，UTC 会给出偏差提示。
+if [[ -n "${CIRCLE_TZ:-}" ]]; then
+  export TZ="$CIRCLE_TZ"
+fi
+
 # 是否已有实例在运行（拿不到锁 = 有实例持有）
 # 注意：数据目录不存在时 flock 无法打开锁文件会误判为"被占用"，
 # 因此先检查目录存在性——目录不存在视为未运行。
