@@ -9,6 +9,7 @@ import { parseCron, nextRun, matches } from "../src/core/cron.js";
 import { assessSafety } from "../src/core/safety.js";
 import { TaskStore } from "../src/core/task-store.js";
 import { ScheduleStore } from "../src/core/schedule-store.js";
+import { formatLocalDateTime, parseLocalDateTime } from "../src/core/time.js";
 import { WorkspaceManager } from "../src/core/workspace.js";
 import { summarizeText } from "../src/team/agent-team.js";
 import { runCase, type TestResult } from "./helpers.js";
@@ -925,6 +926,273 @@ export async function runUnitTests(): Promise<TestResult[]> {
         t.assert(after.nextRunAt! > Date.now(), "nextRunAt 应在未来");
         await sched.tick();
         t.assert(fired === 1, "fire 后 tick 不应重复触发（nextRunAt 已推后）");
+        sched.stop();
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }),
+  );
+
+  // ---------- 一次性触发（issue #49） ----------
+  results.push(
+    await runCase("U-44", "Scheduler", "一次性任务触发后自动停用，后续 tick 不再触发（issue #49）", async (t) => {
+      const dir = mkdtempSync(join(tmpdir(), "circle-unit-sched-once-"));
+      try {
+        const { SchedulerAgent } = await import("../src/agents/scheduler.js");
+        const store = new ScheduleStore(dir);
+        let fired = 0;
+        const sched = new SchedulerAgent(
+          store,
+          { schedulerTickMs: 1000, cleanupAfterDays: 30, cleanupCron: "0 3 * * *", onceGraceMs: 10 * 60_000 } as never,
+          {
+            runScheduled: async () => {
+              fired++;
+              return { taskId: "T-once" };
+            },
+            runDailyCleanup: async () => ({ removedTasks: 0, removedWorkspaces: 0 }),
+          },
+        );
+        const at = formatLocalDateTime(new Date(Date.now() + 3600_000));
+        const s = sched.create({ name: "一次性提醒", at, description: "d", workerName: "dev" });
+        t.assert(s.kind === "once", `应记录 kind=once，实际 ${s.kind}`);
+        t.assert(s.runAt === at, `runAt 应存本地时间字符串，实际 ${s.runAt}`);
+        t.assert(s.nextRunAt === parseLocalDateTime(at).getTime(), "nextRunAt 应由 runAt 派生");
+
+        // 模拟到达触发时间
+        store.update(s.id, { nextRunAt: Date.now() - 1000 });
+        await sched.tick();
+        t.assert(fired === 1, `到期应触发一次，实际 ${fired} 次`);
+        const after = store.get(s.id)!;
+        t.assert(after.enabled === false, "触发后应自动停用");
+        t.assert(after.nextRunAt === undefined, "触发后应清空 nextRunAt");
+        t.assert(after.missedAt === undefined, "正常触发不应标记已错过");
+        t.assert(after.lastRunAt !== undefined, "应记录 lastRunAt");
+
+        // 停用后即使 nextRunAt 被改回过去也不再触发（并发/重启防重）
+        store.update(s.id, { nextRunAt: Date.now() - 1000, enabled: false });
+        await sched.tick();
+        t.assert(fired === 1, "停用后不应再次触发");
+        t.assert(store.summarize().includes("一次性"), "摘要应显示一次性任务");
+        sched.stop();
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }),
+  );
+
+  results.push(
+    await runCase("U-45", "Scheduler", "cron/at 互斥与一次性时间校验（格式/非法日期/过去时间）", async (t) => {
+      const dir = mkdtempSync(join(tmpdir(), "circle-unit-sched-validate-"));
+      try {
+        const { SchedulerAgent } = await import("../src/agents/scheduler.js");
+        const store = new ScheduleStore(dir);
+        const sched = new SchedulerAgent(
+          store,
+          { schedulerTickMs: 1000, cleanupAfterDays: 30, cleanupCron: "0 3 * * *" } as never,
+          {
+            runScheduled: async () => ({ taskId: "T-v" }),
+            runDailyCleanup: async () => ({ removedTasks: 0, removedWorkspaces: 0 }),
+          },
+        );
+        const expectThrow = (fn: () => unknown, needle: string, msg: string) => {
+          try {
+            fn();
+          } catch (e) {
+            t.assert(
+              (e as Error).message.includes(needle),
+              `${msg}：错误信息应包含「${needle}」，实际「${(e as Error).message}」`,
+            );
+            return;
+          }
+          t.assert(false, `${msg}：应抛错但未抛`);
+        };
+        const future = formatLocalDateTime(new Date(Date.now() + 3600_000));
+        expectThrow(
+          () => sched.create({ name: "x", cron: "0 10 * * *", at: future, description: "d", workerName: "dev" }),
+          "二选一",
+          "同时提供 cron 与 at",
+        );
+        expectThrow(
+          () => sched.create({ name: "x", description: "d", workerName: "dev" }),
+          "必须提供",
+          "两者都缺失",
+        );
+        expectThrow(
+          () => sched.create({ name: "x", at: "2026/09/13 09:00", description: "d", workerName: "dev" }),
+          "格式",
+          "非法格式",
+        );
+        expectThrow(
+          () => sched.create({ name: "x", at: "2026-02-30 09:00", description: "d", workerName: "dev" }),
+          "合法",
+          "非法日期（2月30日）",
+        );
+        expectThrow(
+          () => sched.create({ name: "x", at: "2020-01-01 09:00", description: "d", workerName: "dev" }),
+          "晚于当前时间",
+          "过去时间",
+        );
+        expectThrow(
+          () => sched.create({ name: "x", cron: "not a cron", description: "d", workerName: "dev" }),
+          "cron",
+          "非法 cron",
+        );
+        const s = sched.create({ name: "周期", cron: "0 10 * * *", description: "d", workerName: "dev" });
+        expectThrow(
+          () => sched.update(s.id, { cron: "0 11 * * *", runAt: future }),
+          "二选一",
+          "update 同时改 cron 与 runAt",
+        );
+        expectThrow(
+          () => sched.update(s.id, { runAt: "2020-01-01 09:00" }),
+          "晚于当前时间",
+          "update 到过去时间",
+        );
+        // parseLocalDateTime 正常解析（本地时区，秒归零）
+        const parsed = parseLocalDateTime("2026-09-13 09:05");
+        t.assert(
+          parsed.getFullYear() === 2026 && parsed.getMonth() === 8 && parsed.getDate() === 13,
+          "应解析本地年月日",
+        );
+        t.assert(parsed.getHours() === 9 && parsed.getMinutes() === 5, "应解析本地时分");
+        sched.stop();
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }),
+  );
+
+  results.push(
+    await runCase("U-46", "Scheduler", "一次性错过策略：宽限期内补触发，超期标记已错过", async (t) => {
+      const dir = mkdtempSync(join(tmpdir(), "circle-unit-sched-grace-"));
+      try {
+        const { SchedulerAgent } = await import("../src/agents/scheduler.js");
+        const store = new ScheduleStore(dir);
+        let fired = 0;
+        const sched = new SchedulerAgent(
+          store,
+          { schedulerTickMs: 1000, cleanupAfterDays: 30, cleanupCron: "0 3 * * *", onceGraceMs: 10 * 60_000 } as never,
+          {
+            runScheduled: async () => {
+              fired++;
+              return { taskId: `T-grace-${fired}` };
+            },
+            runDailyCleanup: async () => ({ removedTasks: 0, removedWorkspaces: 0 }),
+          },
+        );
+        const at = formatLocalDateTime(new Date(Date.now() + 3600_000));
+        // 宽限期内（1 分钟前）：补触发一次
+        const s1 = sched.create({ name: "补触发", at, description: "d", workerName: "dev" });
+        store.update(s1.id, { nextRunAt: Date.now() - 60_000 });
+        await sched.tick();
+        t.assert(fired === 1, `宽限期内应补触发，实际 ${fired}`);
+        t.assert(store.get(s1.id)!.enabled === false, "补触发后应停用");
+
+        // 超期（11 分钟前，宽限 10 分钟）：标记已错过，不执行
+        const s2 = sched.create({ name: "已错过", at, description: "d", workerName: "dev" });
+        store.update(s2.id, { nextRunAt: Date.now() - 11 * 60_000 });
+        await sched.tick();
+        t.assert(fired === 1, `超期不应执行，实际 ${fired}`);
+        const missed = store.get(s2.id)!;
+        t.assert(missed.enabled === false, "超期后应停用");
+        t.assert(missed.nextRunAt === undefined, "超期后应清空 nextRunAt");
+        t.assert(missed.missedAt !== undefined, "超期后应标记 missedAt");
+        t.assert(store.summarize().includes("已错过"), "摘要应显示已错过");
+        sched.stop();
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }),
+  );
+
+  results.push(
+    await runCase("U-47", "Scheduler", "旧 schedules.json 兼容 + 启动时从 runAt 重算 nextRunAt", async (t) => {
+      const dir = mkdtempSync(join(tmpdir(), "circle-unit-sched-legacy-"));
+      try {
+        // 旧数据（无 kind 字段）应归一化为 cron
+        writeFileSync(
+          join(dir, "schedules.json"),
+          JSON.stringify({
+            seq: 2,
+            schedules: [
+              {
+                id: "S-OLD-001",
+                name: "旧周期任务",
+                cron: "0 10 * * *",
+                description: "d",
+                workerName: "dev",
+                enabled: true,
+                createdAt: Date.now(),
+                taskIds: [],
+              },
+            ],
+          }),
+        );
+        const { SchedulerAgent } = await import("../src/agents/scheduler.js");
+        const store = new ScheduleStore(dir);
+        t.assert(store.get("S-OLD-001")!.kind === "cron", "旧数据应归一化为 cron");
+        t.assert(store.summarize().includes("🔁"), "旧任务应仍显示为周期任务");
+
+        const sched = new SchedulerAgent(
+          store,
+          { schedulerTickMs: 1000, cleanupAfterDays: 30, cleanupCron: "0 3 * * *" } as never,
+          {
+            runScheduled: async () => ({ taskId: "T-legacy" }),
+            runDailyCleanup: async () => ({ removedTasks: 0, removedWorkspaces: 0 }),
+          },
+        );
+        // 一次性任务：手工清空 nextRunAt，start() 应从 runAt 重算
+        const at = formatLocalDateTime(new Date(Date.now() + 7200_000));
+        const s = sched.create({ name: "一次性", at, description: "d", workerName: "dev" });
+        store.update(s.id, { nextRunAt: undefined });
+        sched.start();
+        sched.stop();
+        t.assert(
+          store.get(s.id)!.nextRunAt === parseLocalDateTime(at).getTime(),
+          "start() 应从 runAt 重算 nextRunAt",
+        );
+        t.assert(store.get("S-OLD-001")!.nextRunAt !== undefined, "旧周期任务启动时应补齐 nextRunAt");
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }),
+  );
+
+  results.push(
+    await runCase("U-48", "Scheduler", "update 切换 cron/一次性 与 re-arm", async (t) => {
+      const dir = mkdtempSync(join(tmpdir(), "circle-unit-sched-update-"));
+      try {
+        const { SchedulerAgent } = await import("../src/agents/scheduler.js");
+        const store = new ScheduleStore(dir);
+        const sched = new SchedulerAgent(
+          store,
+          { schedulerTickMs: 1000, cleanupAfterDays: 30, cleanupCron: "0 3 * * *" } as never,
+          {
+            runScheduled: async () => ({ taskId: "T-update" }),
+            runDailyCleanup: async () => ({ removedTasks: 0, removedWorkspaces: 0 }),
+          },
+        );
+        // cron → once 切换
+        const s = sched.create({ name: "任务", cron: "0 10 * * *", description: "d", workerName: "dev" });
+        const at = formatLocalDateTime(new Date(Date.now() + 3600_000));
+        let updated = sched.update(s.id, { runAt: at })!;
+        t.assert(updated.kind === "once" && updated.runAt === at, "应切换为一次性并更新 runAt");
+        t.assert(updated.cron === undefined, "切换后应清空 cron");
+        t.assert(updated.enabled === true, "提供 runAt 应默认重新启用");
+        t.assert(updated.nextRunAt === parseLocalDateTime(at).getTime(), "nextRunAt 应由新 runAt 派生");
+
+        // 模拟已触发停用后 re-arm
+        store.update(s.id, { enabled: false, lastRunAt: Date.now() - 1000, missedAt: Date.now() - 500 });
+        const at2 = formatLocalDateTime(new Date(Date.now() + 7200_000));
+        updated = sched.update(s.id, { runAt: at2 })!;
+        t.assert(updated.enabled === true, "re-arm 后应重新启用");
+        t.assert(updated.missedAt === undefined, "re-arm 应清除错过标记");
+
+        // once → cron 切换
+        updated = sched.update(s.id, { cron: "30 7 * * *" })!;
+        t.assert(updated.kind === "cron" && updated.cron === "30 7 * * *", "应切换回周期任务");
+        t.assert(updated.runAt === undefined, "切换后应清空 runAt");
+        t.assert(updated.nextRunAt !== undefined, "应重算 nextRunAt");
         sched.stop();
       } finally {
         rmSync(dir, { recursive: true, force: true });

@@ -54,6 +54,7 @@ npm start
 #    你好
 #    请派一个长程任务给 default Worker：sleep 15 秒后把结果写入 result.txt
 #    创建一个定时任务：每天上午 10 点检查任务状态，cron 0 10 * * *
+#    创建一个一次性提醒：明天 09:00 提醒我提交材料（自动换算为 at，只触发一次）
 ```
 
 更多接入方式（HTTP / 微信）与配置项见 [docs/usage.md](docs/usage.md)。
@@ -79,6 +80,19 @@ curl -X POST http://localhost:8787/message -H 'Content-Type: application/json' -
 Coordinator 只处理一轮、只回复一条；文本按顺序拼接、图片附件全部保留并随任务派发。
 合并窗口**只由附件消息触发**——纯文本消息零延迟、立即回复，日常文字对话不受影响。
 对所有 IM 通道（微信 / HTTP / 控制台）统一生效，实现见 `src/core/message-merge.ts`。
+
+## 一次性定时任务（issue #49）
+
+除周期性 cron 外，支持「只在某个绝对时刻触发一次」的定时任务，创建时 `cron` 与 `at` 二选一：
+
+- `at` 为本地时间 `YYYY-MM-DD HH:mm`（与 cron 同按进程本地时区解释），必须晚于当前时间；
+- 触发后自动停用并保留记录——`list_schedules` 中显示 `⏰` 待触发 / `✅` 已触发 / `⚠️` 已错过，不会次年重复；
+- 进程宕机错过触发：宽限期内（默认 10 分钟，`CIRCLE_ONCE_GRACE_MS` 可调）补触发一次，超期标记「已错过」不再执行。
+
+```
+你：明天上午 9 点提醒我提交材料。
+Coordinator：定时任务创建成功：S-XXX「提交材料提醒」，触发时间 2026-09-14 09:00，Worker: default。
+```
 
 ## Coordinator 与 Worker 使用不同模型
 

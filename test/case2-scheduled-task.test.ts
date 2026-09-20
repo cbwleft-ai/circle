@@ -57,7 +57,7 @@ export async function runCase2(): Promise<TestResult[]> {
             { timeoutMs: 90_000, msg: "定时任务应被创建" },
           );
           t.log(`[${((Date.now() - t0) / 1000).toFixed(1)}s] 定时任务已创建: ${schedule.id}「${schedule.name}」cron="${schedule.cron}"`);
-          t.assert(schedule.cron.split(/\s+/).length === 5, `cron 应为 5 段，实际 "${schedule.cron}"`);
+          t.assert(schedule.cron?.split(/\s+/).length === 5, `cron 应为 5 段，实际 "${schedule.cron}"`);
           t.assert(schedule.workerName === "dev", `Worker 应为 dev，实际 ${schedule.workerName}`);
 
           // 3) 模拟到达触发时间：由 Scheduler 触发（测试环境不等待真实 10:00）

@@ -91,6 +91,20 @@ Coordinator：🔁 S-XXX 每日备份（cron: "0 9 * * *"，下次触发: 2026/8
 Coordinator：定时任务 S-XXX 已删除。
 ```
 
+一次性任务（issue #49）——只触发一次、触发后自动停用：
+
+```
+你：明天上午 9 点提醒我提交材料。
+Coordinator：定时任务创建成功：S-XXX「提交材料提醒」，触发时间 2026-9-14 09:00，Worker: default。
+
+你：查询定时任务
+Coordinator：⏰ S-XXX 提交材料提醒（一次性: 2026-9-14 09:00，Worker: default，待触发，已触发 0 次）…
+```
+
+> 周期性任务用 `cron`（5 段表达式），一次性任务用 `at`（本地时间 `YYYY-MM-DD HH:mm`），二者二选一。
+> 一次性任务触发一次后自动停用（状态变「已触发」）；若进程宕机错过触发时刻，宽限期内
+> （默认 10 分钟，`CIRCLE_ONCE_GRACE_MS` 可调）补触发一次，超期标记“已错过”不再执行。
+
 ### 3.5 任务状态查询
 
 ```
@@ -211,6 +225,7 @@ npm start
 | `CIRCLE_STATUS_CHECK_INTERVAL` | `5` | Coordinator 每 N 轮检查待办任务 |
 | `CIRCLE_MESSAGE_MERGE_MS` | `1500` | 附件消息合并窗口（毫秒）：收到图片/文件后，窗口内的后续消息合并为一批，Coordinator 只回复一次；纯文本消息零延迟；`0` = 关闭合并 |
 | `CIRCLE_SCHEDULER_TICK_MS` | `30000` | Scheduler tick 间隔（毫秒） |
+| `CIRCLE_ONCE_GRACE_MS` | `600000` | 一次性任务错过触发后的补触发宽限期（毫秒）：宽限期内补触发一次，超期标记“已错过”不再执行 |
 | `CIRCLE_CLEANUP_AFTER_DAYS` | `30` | 已完成任务保留天数 |
 | `CIRCLE_CLEANUP_CRON` | `0 3 * * *` | 每日清理时间 |
 | `CIRCLE_TASK_TIMEOUT_MS` | `1800000` | 单任务执行超时（毫秒） |
