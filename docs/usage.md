@@ -215,7 +215,35 @@ npm start
 下行消息通过 `HttpAdapter.downstreamHook` 回调输出（可对接各平台机器人 webhook），
 详见 `src/im/http.ts` 与二次开发文档。
 
-## 6. 环境变量总表
+## 6. 接入飞书（issue #54）
+
+1. 在飞书开放平台创建**自建应用**，开通机器人能力与事件订阅（`im.message.receive_v1`）；
+2. 申请权限：读取消息与下载图片（如 `im:message`、`im:resource`，以开放平台为准）；
+   全量接收群消息（`im:message.group_msg`）为敏感权限，**首版未启用**：默认只响应 @bot 的消息；
+3. 事件订阅选择「将事件发送至开发者服务器」，地址填 `http://<host>:<CIRCLE_FEISHU_PORT><CIRCLE_FEISHU_EVENT_PATH>`；
+   需要公网可达或反向代理；如使用了加密，设置 `CIRCLE_FEISHU_ENCRYPT_KEY`；
+4. 启动：
+
+```bash
+export CIRCLE_IM_ADAPTER=feishu
+export CIRCLE_FEISHU_APP_ID=cli_xxx
+export CIRCLE_FEISHU_APP_SECRET=xxx
+export CIRCLE_FEISHU_VERIFICATION_TOKEN=xxx
+npm start
+```
+
+### 会话与话题
+
+- 私聊与群聊统一映射为 `fs:<chat_id>`；话题/回复串的会话键为 `fs:<chat_id>:<root_id>`，
+  各话题上下文互相隔离（见 #53）：
+  - 消息里的 `root_id`（优先）或 `thread_id` 作为 threadKey；
+  - 同一话题内的消息共享一个 Coordinator 会话；话题内的回复通过 `message.reply + reply_in_thread`
+    落回原话题；
+  - 话题首次唤醒时目前只带当前消息，**不注入话题历史与群历史**（后续增强见 #54）；
+- 群聊消息默认 @bot 才响应；回复会带发送者归因信息（`[昵称]`，需要平台提供名称时后续补充）；
+- 文件（非图片）发送暂未实现，产出物发送会自动降级为文本 + 路径提示。
+
+## 7. 环境变量总表
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
@@ -237,17 +265,24 @@ npm start
 | `CIRCLE_COORDINATOR_SESSION_TTL_MS` | `7200000` | Coordinator 空闲会话回收 TTL（毫秒） |
 | `CIRCLE_DEFAULT_CHAT_ID` | `console` | 无归属任务/定时任务回流使用的默认会话 |
 | `CIRCLE_ADMIN_CHAT_IDS` | - | 管理员会话列表（逗号分隔），可跨会话查看/管理任务与产出物 |
-| `CIRCLE_IM_ADAPTER` | `console` | `console` / `http` / `weixin`（官方）/ `wechat`（wechaty 旧方案） |
+| `CIRCLE_IM_ADAPTER` | `console` | `console` / `http` / `weixin`（官方）/ `feishu`（飞书）/ `wechat`（wechaty 旧方案） |
 | `CIRCLE_HTTP_PORT` | `8787` | HTTP 适配器端口 |
 | `CIRCLE_WEIXIN_BOT_TOKEN` | - | 微信官方通道：直接指定 bot token（跳过扫码） |
 | `CIRCLE_WEIXIN_BASE_URL` | 官方地址 | 微信官方通道 API 地址 |
 | `CIRCLE_WEIXIN_BOT_TYPE` | `3` | 微信官方通道 bot 类型 |
+| `CIRCLE_FEISHU_APP_ID` / `CIRCLE_FEISHU_APP_SECRET` | - | 飞书自建应用凭据（事件订阅 + 消息 API） |
+| `CIRCLE_FEISHU_VERIFICATION_TOKEN` | - | 飞书事件订阅 Verification Token |
+| `CIRCLE_FEISHU_ENCRYPT_KEY` | - | 飞书事件 Encrypt Key（配置后按 AES-256-CBC 解密事件体） |
+| `CIRCLE_FEISHU_PORT` | `8788` | 飞书 webhook 监听端口 |
+| `CIRCLE_FEISHU_EVENT_PATH` | `/feishu/events` | 飞书 webhook 事件路径 |
+| `CIRCLE_FEISHU_BOT_OPEN_ID` | - | bot 自身 open_id（用于剔除消息中的 @bot 占位符） |
+| `CIRCLE_FEISHU_BASE_URL` | `https://open.feishu.cn` | 飞书 API 地址（私有化/测试可覆盖） |
 | `CIRCLE_WORKERS` | - | Worker 配置 JSON 数组（见下） |
 | `WECHAT_PUPPET` / `WECHAT_PUPPET_TOKEN` / `WECHAT_ALLOW_CONTACTS` | - | 微信适配器配置 |
 | `CIRCLE_LOG_LEVEL` | `info` | 日志级别 debug/info/warn/error |
 | `CIRCLE_TZ` | 系统时区 | 仅 `scripts/circle.sh` 使用：导出为 `TZ`（影响系统时间注入与 cron 解释）。UTC 容器部署建议设为 `Asia/Shanghai` |
 
-## 7. 配置多个 Worker
+## 8. 配置多个 Worker
 
 ```bash
 export CIRCLE_WORKERS='[
@@ -260,7 +295,7 @@ npm start
 每个 Worker 独立工作环境（工作目录 + 技能），互不影响；产出物输出到各自工作目录。
 技能也可直接放在工作目录 `.pi/skills/` 下（自动发现）。
 
-## 8. 数据与产出物
+## 9. 数据与产出物
 
 ```
 data/
@@ -310,7 +345,7 @@ Coordinator：（调用 send_artifact 后）已发送：report.md ✓
 > 微信 iLink 通道支持文件（type 4）与图片（type 2）消息，走官方上传链路
 > （getuploadurl → AES-128-ECB 加密 → CDN → sendmessage）。
 
-## 9. 连续消息合并（照片 + 描述 → 一条回复）
+## 10. 连续消息合并（照片 + 描述 → 一条回复）
 
 用户在微信中常**先发一张照片、再补一句描述**（如「看下这张截图里的报错」）。若每条消息
 各自触发一轮 Coordinator 回复，会产生多条割裂的回复。

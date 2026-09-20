@@ -12,6 +12,7 @@ import { defaultWorkers, loadConfig } from "./config.js";
 import { log, setLogFile } from "./core/logger.js";
 import { timezoneInfo } from "./core/time.js";
 import { ConsoleAdapter } from "./im/console.js";
+import { FeishuAdapter } from "./im/feishu.js";
 import { HttpAdapter } from "./im/http.js";
 import { WechatAdapter } from "./im/wechat.js";
 import { WeixinIlinkAdapter } from "./im/weixin-ilink.js";
@@ -41,11 +42,14 @@ async function main(): Promise<void> {
   const team = await AgentTeam.create({
     config,
     workers: defaultWorkers(config.dataDir),
-    outbox: async (chatId, text) => {
-      await adapter.send(chatId, text);
+    outbox: async (chatId, text, target) => {
+      await adapter.send(chatId, text, target);
     },
     // 文件附件：适配器支持则直发；不支持（console/http 等）时 AgentTeam 自动降级为文本提示
-    sendFile: "sendFile" in adapter ? (chatId, file) => adapter.sendFile!(chatId, file) : undefined,
+    sendFile:
+      "sendFile" in adapter
+        ? (chatId, file, target) => adapter.sendFile!(chatId, file, target)
+        : undefined,
   });
   await team.start();
 
@@ -58,13 +62,26 @@ async function main(): Promise<void> {
   log.info("bootstrap", "Circle 已就绪，等待消息…");
 }
 
-function createAdapter(
-  kind: "console" | "http" | "wechat" | "weixin",
-  config: ReturnType<typeof loadConfig>,
-) {
+function createAdapter(kind: ReturnType<typeof loadConfig>["imAdapter"], config: ReturnType<typeof loadConfig>) {
   switch (kind) {
     case "http":
       return new HttpAdapter(config.httpPort);
+    case "feishu":
+      if (!config.feishu.appId || !config.feishu.appSecret) {
+        throw new Error(
+          "飞书适配器需要 CIRCLE_FEISHU_APP_ID / CIRCLE_FEISHU_APP_SECRET（应用凭据，见 docs/usage.md）",
+        );
+      }
+      return new FeishuAdapter({
+        appId: config.feishu.appId,
+        appSecret: config.feishu.appSecret,
+        verificationToken: config.feishu.verificationToken,
+        encryptKey: config.feishu.encryptKey,
+        port: config.feishu.port,
+        eventPath: config.feishu.eventPath,
+        botOpenId: config.feishu.botOpenId,
+        baseUrl: config.feishu.baseUrl,
+      });
     case "wechat":
       // 旧方案：wechaty 逆向协议（不推荐，见 docs/usage.md）
       return new WechatAdapter({

@@ -18,7 +18,7 @@ import { createCipheriv, createDecipheriv, randomBytes, createHash } from "node:
 import { join } from "node:path";
 import { log } from "../core/logger.js";
 import { localTimestamp } from "../core/time.js";
-import type { ChatAttachment, ChatMessage, OutboundFile } from "../core/types.js";
+import type { ChatAttachment, ChatMessage, OutboundFile, OutboundTarget } from "../core/types.js";
 import type { ImAdapter } from "./adapter.js";
 
 // ============================================================================
@@ -478,7 +478,7 @@ export class WeixinIlinkAdapter implements ImAdapter {
     this.saveRegistry();
   }
 
-  async send(chatId: string, text: string): Promise<void> {
+  async send(chatId: string, text: string, _target?: OutboundTarget): Promise<void> {
     if (!this.token) throw new Error("微信未登录");
     const toUserId = chatId.startsWith("wx:") ? chatId.slice(3) : chatId;
     const clientId = `circle-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -522,7 +522,7 @@ export class WeixinIlinkAdapter implements ImAdapter {
    *   2. 文件内容 AES-128-ECB 加密后 POST 到 CDN（响应头 x-encrypted-param 为下载参数）；
    *   3. ilink/bot/sendmessage 发送 type 4（文件）/ type 2（图片）消息。
    */
-  async sendFile(chatId: string, file: OutboundFile): Promise<void> {
+  async sendFile(chatId: string, file: OutboundFile, _target?: OutboundTarget): Promise<void> {
     if (!this.token) throw new Error("微信未登录");
     if (file.size > WEIXIN_MAX_FILE_BYTES) {
       throw new Error(`文件过大（${file.size} 字节），微信通道上限 ${WEIXIN_MAX_FILE_BYTES} 字节`);

@@ -57,6 +57,8 @@ export interface Task {
   requestChatId?: string;
   /** 发起消息的发送者 id（归因用，可选） */
   requestSenderId?: string;
+  /** 发起消息所在线程键（异步结果回流原话题，issue #54） */
+  requestThreadKey?: string;
   /** 用户附带的图片/文件（落盘路径），Worker 执行时作为图片输入传给模型（issue #3） */
   attachments?: TaskAttachment[];
   createdAt: number;
@@ -135,6 +137,11 @@ export interface ChatMessage {
   senderId?: string;
   /** 发送者展示名（仅用于提示词归因，不落存储） */
   senderName?: string;
+  /**
+   * 会话线程键（issue #54）：飞书话题/回复串的 root_id 或 thread_id；
+   * 缺省表示主会话（私聊或群根级）。conversationKey = chatId + threadKey。
+   */
+  threadKey?: string;
   text: string;
   /** 附带附件（图片/文件），base64 内容或本地路径，由 IM 适配器提供（issue #3） */
   attachments?: ChatAttachment[];
@@ -161,6 +168,15 @@ export interface TaskAttachment {
   /** 落盘后的绝对路径 */
   path: string;
   mimeType?: string;
+}
+
+/** 下行消息目标（话题/线程上下文，issue #54） */
+export interface OutboundTarget {
+  /**
+   * 线程键：飞书为话题根消息 id（用于 message.reply + reply_in_thread）。
+   * 适配器按平台语义使用；不支持话题的通道忽略。
+   */
+  threadKey?: string;
 }
 
 /** 下行文件消息载荷（附件） */

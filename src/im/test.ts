@@ -1,14 +1,14 @@
 /**
  * 测试适配器：内存实现，供自动化测试注入消息并捕获回复。
  */
-import type { ChatAttachment, ChatMessage, OutboundFile } from "../core/types.js";
+import type { ChatAttachment, ChatMessage, OutboundFile, OutboundTarget } from "../core/types.js";
 import type { ImAdapter } from "./adapter.js";
 
 export class TestAdapter implements ImAdapter {
   readonly name = "test";
-  sent: Array<{ chatId: string; text: string; ts: number }> = [];
+  sent: Array<{ chatId: string; text: string; target?: OutboundTarget; ts: number }> = [];
   /** 文件发送记录（sendFile 调用捕获） */
-  sentFiles: Array<{ chatId: string; file: OutboundFile; ts: number }> = [];
+  sentFiles: Array<{ chatId: string; file: OutboundFile; target?: OutboundTarget; ts: number }> = [];
   private handler?: (msg: ChatMessage) => void;
 
   onMessage(cb: (msg: ChatMessage) => void): void {
@@ -22,24 +22,25 @@ export class TestAdapter implements ImAdapter {
     chatId: string,
     text: string,
     attachments?: ChatAttachment[],
-    opts?: { chatType?: ChatMessage["chatType"]; senderId?: string; senderName?: string },
+    opts?: { chatType?: ChatMessage["chatType"]; senderId?: string; senderName?: string; threadKey?: string },
   ): Promise<void> {
     this.handler?.({
       chatId,
       chatType: opts?.chatType,
       senderId: opts?.senderId,
       senderName: opts?.senderName,
+      threadKey: opts?.threadKey,
       text,
       attachments,
     });
   }
 
-  async send(chatId: string, text: string): Promise<void> {
-    this.sent.push({ chatId, text, ts: Date.now() });
+  async send(chatId: string, text: string, target?: OutboundTarget): Promise<void> {
+    this.sent.push({ chatId, text, target, ts: Date.now() });
   }
 
-  async sendFile(chatId: string, file: OutboundFile): Promise<void> {
-    this.sentFiles.push({ chatId, file, ts: Date.now() });
+  async sendFile(chatId: string, file: OutboundFile, target?: OutboundTarget): Promise<void> {
+    this.sentFiles.push({ chatId, file, target, ts: Date.now() });
   }
 
   /** 所有已发送文本（拼接） */

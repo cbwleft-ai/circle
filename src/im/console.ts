@@ -3,7 +3,7 @@
  * 适合本地演示、调试与自动化测试。
  */
 import { createInterface } from "node:readline";
-import type { ChatMessage } from "../core/types.js";
+import type { ChatMessage, OutboundTarget } from "../core/types.js";
 import { log } from "../core/logger.js";
 import type { ImAdapter } from "./adapter.js";
 
@@ -33,7 +33,7 @@ export class ConsoleAdapter implements ImAdapter {
     this.rl?.close();
   }
 
-  async send(chatId: string, text: string): Promise<void> {
+  async send(chatId: string, text: string, _target?: OutboundTarget): Promise<void> {
     if (chatId !== "console") return;
     console.log("\n🤖 Coordinator: " + text.replace(/\n/g, "\n        "));
   }
