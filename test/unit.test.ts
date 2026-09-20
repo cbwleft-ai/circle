@@ -6,10 +6,17 @@ import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSy
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import { parseCron, nextRun, matches } from "../src/core/cron.js";
+import {
+  formatLocalDateTime,
+  localDay,
+  localTimestamp,
+  parseLocalDateTime,
+  systemTimeBlock,
+  timezoneInfo,
+} from "../src/core/time.js";
 import { assessSafety } from "../src/core/safety.js";
 import { TaskStore } from "../src/core/task-store.js";
 import { ScheduleStore } from "../src/core/schedule-store.js";
-import { formatLocalDateTime, parseLocalDateTime } from "../src/core/time.js";
 import { WorkspaceManager } from "../src/core/workspace.js";
 import { summarizeText } from "../src/team/agent-team.js";
 import { runCase, type TestResult } from "./helpers.js";
@@ -193,8 +200,16 @@ export async function runUnitTests(): Promise<TestResult[]> {
         `期望本地 10:00，实际本地 ${next!.getHours()}:${String(next!.getMinutes()).padStart(2, "0")}`,
       );
       t.assert(next!.getDate() === 1, "应为当天触发");
-      // 修复前按 UTC 解析会得到 10:00Z = 本地 18:00，晚 8 小时
-      t.assert(next!.getTime() !== new Date("2025-01-01T10:00:00Z").getTime(), "不应按 UTC 解析触发（晚 8 小时）");
+      // 严格等于本地 10:00 构造的瞬间（本地时区语义）
+      t.assert(next!.getTime() === new Date(2025, 0, 1, 10, 0, 0).getTime(), "应等于本地 10:00 的瞬间");
+      // 修复前按 UTC 解析会得到 10:00Z = 本地 18:00，晚 8 小时；
+      // TZ=UTC 时本地 10:00 与 10:00Z 天然相同，无法区分旧行为，跳过反向断言
+      if (now.getTimezoneOffset() !== 0) {
+        t.assert(
+          next!.getTime() !== new Date("2025-01-01T10:00:00Z").getTime(),
+          "不应按 UTC 解析触发（晚 8 小时）",
+        );
+      }
     }),
   );
 
@@ -398,9 +413,13 @@ export async function runUnitTests(): Promise<TestResult[]> {
       const localMin = next!.getHours() * 60 + next!.getMinutes();
       t.assert(localMin === 9 * 60, `应为本地 09:00，实际本地 ${next!.getHours()}:${String(next!.getMinutes()).padStart(2, "0")}`);
       t.assert(next!.getDate() === 1, "应为当天本地 09:00 触发");
-      // 旧实现按 UTC 解析：09:00Z = 本地 17:00（晚 8 小时）
-      const buggyUtc = new Date("2025-01-01T09:00:00Z");
-      t.assert(next!.getTime() !== buggyUtc.getTime(), `不应触发于 09:00Z（=本地 17:00，晚 8 小时），实际 ${next!.toISOString()}`);
+      // 严格等于本地 09:00 构造的瞬间；旧实现按 UTC 解析时（非 UTC 环境）会落在本地 17:00
+      t.assert(next!.getTime() === new Date(2025, 0, 1, 9, 0, 0).getTime(), `应为本地 09:00 的瞬间，实际 ${next!.toLocaleString("zh-CN")}`);
+      if (from.getTimezoneOffset() !== 0) {
+        // TZ=UTC 时本地 09:00 与 09:00Z 是同一瞬间，无法区分旧行为，跳过反向断言
+        const buggyUtc = new Date("2025-01-01T09:00:00Z");
+        t.assert(next!.getTime() !== buggyUtc.getTime(), `不应触发于 09:00Z（=本地 17:00，晚 8 小时），实际 ${next!.toISOString()}`);
+      }
       t.log(`nextRun("0 9 * * *", 本地 00:00) → ${next!.toLocaleString("zh-CN")}（本地 09:00，不再晚 8 小时）`);
     }),
   );
@@ -415,6 +434,26 @@ export async function runUnitTests(): Promise<TestResult[]> {
       t.assert(matches("0 3 * * *", new Date(2025, 0, 1, 3, 0, 0)), "本地 03:00 应匹配清理 cron");
       t.assert(!matches("0 3 * * *", new Date(2025, 0, 1, 11, 0, 0)), "本地 11:00 不应匹配清理 cron");
       t.log("matches 已按本地时区判定，旧 UTC 误匹配已消除");
+    }),
+  );
+
+  // ---------- 时间工具（本地时区） ----------
+  results.push(
+    await runCase("U-49", "时间工具", "localDay / localTimestamp / systemTimeBlock / timezoneInfo 均按进程本地时区", async (t) => {
+      const d = new Date(2026, 8, 20, 15, 1, 44, 123); // 本地 2026-09-20 15:01:44.123（周日）
+      t.assertEqual(localDay(d), "2026-09-20", "localDay 应为本地日期");
+      t.assertEqual(systemTimeBlock(d), "（系统时间：2026-09-20 15:01，周日）", "系统时间块应为本地时间+星期");
+      const ts = localTimestamp(d);
+      t.assert(/^2026-09-20T15:01:44\.123[+-]\d{2}:\d{2}$/.test(ts), `时间戳应为本地 ISO 8601 带偏移，实际 ${ts}`);
+      const offset = -d.getTimezoneOffset();
+      const sign = offset >= 0 ? "+" : "-";
+      const abs = Math.abs(offset);
+      const offText = `${sign}${String(Math.floor(abs / 60)).padStart(2, "0")}:${String(abs % 60).padStart(2, "0")}`;
+      t.assert(ts.endsWith(offText), `时间戳偏移应与 Date 一致（期望 ${offText}），实际 ${ts}`);
+      const tz = timezoneInfo(d);
+      t.assertEqual(tz.offsetMinutes, offset, "时区偏移分钟应与 Date 一致");
+      t.assert(tz.label.includes(`UTC${offset >= 0 ? "+" : "-"}`), `label 应含 UTC 偏移，实际 ${tz.label}`);
+      t.log(`时区: ${tz.label}；本地时间戳: ${ts}`);
     }),
   );
 
@@ -1193,6 +1232,39 @@ export async function runUnitTests(): Promise<TestResult[]> {
         t.assert(updated.kind === "cron" && updated.cron === "30 7 * * *", "应切换回周期任务");
         t.assert(updated.runAt === undefined, "切换后应清空 runAt");
         t.assert(updated.nextRunAt !== undefined, "应重算 nextRunAt");
+        sched.stop();
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }),
+  );
+
+  results.push(
+    await runCase("U-16d", "Scheduler", "启动即到达清理时刻不因 60s 防重漏执行（回归）", async (t) => {
+      const dir = mkdtempSync(join(tmpdir(), "circle-unit-sched-cleanup-"));
+      try {
+        const { SchedulerAgent } = await import("../src/agents/scheduler.js");
+        const store = new ScheduleStore(dir);
+        let cleanups = 0;
+        const sched = new SchedulerAgent(
+          store,
+          { schedulerTickMs: 1000, cleanupAfterDays: 30, cleanupCron: "0 3 * * *" } as never,
+          {
+            runScheduled: async () => ({ taskId: "T-clean" }),
+            runDailyCleanup: async () => {
+              cleanups++;
+              return { removedTasks: 0, removedWorkspaces: 0 };
+            },
+          },
+        );
+        // 直接注入清理时刻（本地 2025-01-01 03:00，匹配默认清理 cron）。
+        // 旧实现基于「上次检查时间」（构造时刻）防重：该时刻远早于构造时刻，diff 为负而被跳过。
+        const runCheck = (d: Date) =>
+          (sched as unknown as { maybeRunCleanup(now: Date): Promise<void> }).maybeRunCleanup(d);
+        await runCheck(new Date(2025, 0, 1, 3, 0, 0));
+        t.assert(cleanups === 1, `命中清理时刻应立即执行，实际 ${cleanups} 次`);
+        await runCheck(new Date(2025, 0, 1, 3, 0, 30));
+        t.assert(cleanups === 1, "同一触发分钟内第二次检查应被 60s 防重挡住");
         sched.stop();
       } finally {
         rmSync(dir, { recursive: true, force: true });
