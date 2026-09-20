@@ -27,7 +27,8 @@ export interface SchedulerDeps {
 
 export class SchedulerAgent {
   private timer?: ReturnType<typeof setInterval>;
-  private lastCleanupCheck: Date = new Date();
+  /** 上次实际执行每日清理的时间戳（0 = 本次进程尚未执行过）；用于同一触发分钟内的防重 */
+  private lastCleanupAt = 0;
   /** 正在执行中的定时任务 id（in-flight 锁）：tick 与 fire 并发时防止同一任务重复触发 */
   private readonly inFlight = new Set<string>();
 
@@ -226,9 +227,11 @@ export class SchedulerAgent {
     const cron = this.config.cleanupCron;
     try {
       const parsed = parseCron(cron);
-      // 每分钟粒度：检查上一个 tick 到现在是否跨过触发时刻
-      if (matches(parsed, now) && now.getTime() - this.lastCleanupCheck.getTime() > 60_000) {
-        this.lastCleanupCheck = now;
+      // 每分钟粒度：命中触发时刻且距上次实际执行超过 60s（同一分钟内多次 tick 只执行一次）。
+      // 必须基于「上次实际执行时间」而非「上次检查时间」：否则进程恰在清理时刻前 60s 内
+      // 启动时，首个命中的 tick 会被防重条件跳过，导致当天清理整体漏执行。
+      if (matches(parsed, now) && now.getTime() - this.lastCleanupAt > 60_000) {
+        this.lastCleanupAt = now.getTime();
         const res = await this.deps.runDailyCleanup();
         log.info(
           "scheduler",
