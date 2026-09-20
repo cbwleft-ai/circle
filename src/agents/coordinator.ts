@@ -25,6 +25,7 @@ import { Type } from "typebox";
 import type { AppConfig } from "../config.js";
 import { log } from "../core/logger.js";
 import { systemTimeBlock } from "../core/time.js";
+import type { ScheduledTask } from "../core/types.js";
 import type { TeamGateway } from "../team/gateway.js";
 
 export class CoordinatorAgent {
@@ -94,7 +95,11 @@ export class CoordinatorAgent {
 2. 需要执行的任务 → 调用 dispatch_task 派发给合适的 Worker；
    - 预计运行超过 10 秒（长程任务，如 sleep/等待/下载/爬取/批量/编译/渲染）→ 设置 long=true，并立即回复「任务已收到」，告知用户任务编号，说明完成后会主动汇报；
    - 短程任务 → 直接派发并把结果汇报给用户；
-3. 定时任务（周期性任务）→ 调用 create_schedule / update_schedule / delete_schedule 管理，把自然语言时间换算成 5 段 cron（如"每天上午 10 点"→"0 10 * * *"）；
+3. 定时任务 → 调用 create_schedule / update_schedule / delete_schedule 管理，按需选择两种触发方式：
+   - 周期性任务：用 cron（5 段，分 时 日 月 周），如"每天上午 10 点"→"0 10 * * *"；
+   - 一次性任务（只触发一次，如"明天 09:00 提醒我提交材料"）：用 at 填本地绝对时间 "YYYY-MM-DD HH:mm"，
+     以注入的系统时间为锚点换算（必须晚于当前时间）。**不要**用 cron 的日期字段凑一次性任务（那会在次年重复触发）；
+   - cron 与 at 必须二选一；任务触发一次后会自动停用，可查询但不再重复执行；
 4. 用户询问任务/定时任务状态 → 调用 list_tasks / list_schedules / list_workers 查询并汇报；
 5. 收到系统通知（Worker 完成长程任务、定时任务触发结果）→ 整理后向用户汇报最终结果。
    注意：通知中的执行结果可能是「摘要」（长文本头尾保留、中间省略，完整结果已存储）。
@@ -166,21 +171,36 @@ ${workers || "- （暂无 Worker）"}
       defineTool({
         name: "create_schedule",
         label: "创建定时任务",
-        description: "创建周期性定时任务。cron 为 5 段表达式（分 时 日 月 周）。",
+        description:
+          "创建定时任务。周期性任务用 5 段 cron（分 时 日 月 周）；一次性任务用 at（本地时间 YYYY-MM-DD HH:mm）。cron 与 at 必须二选一。",
         parameters: Type.Object({
           name: Type.String({ description: "定时任务名称" }),
-          cron: Type.String({ description: "5 段 cron 表达式，如 0 10 * * *" }),
+          cron: Type.Optional(
+            Type.String({ description: "5 段 cron 表达式（周期性任务），如 0 10 * * *；与 at 二选一" }),
+          ),
+          at: Type.Optional(
+            Type.String({
+              description:
+                "一次性触发时刻，本地时间 YYYY-MM-DD HH:mm，如 2026-09-13 09:00；与 cron 二选一，且必须晚于当前时间",
+            }),
+          ),
           description: Type.String({ description: "触发时派发给 Worker 的执行指令" }),
           worker: Type.String({ description: "执行该任务的 Worker 名称" }),
         }),
         execute: async (_id, params) => {
           try {
-            const s = g.createSchedule(params.name, params.cron, params.description, params.worker);
+            const s = g.createSchedule(
+              params.name,
+              { cron: params.cron, at: params.at },
+              params.description,
+              params.worker,
+            );
+            const when = s.kind === "once" ? `触发时间 ${s.runAt}` : `cron "${s.cron}"`;
             return {
               content: [
                 {
                   type: "text",
-                  text: `定时任务创建成功：${s.id}「${s.name}」，cron "${s.cron}"，Worker: ${s.workerName}。`,
+                  text: `定时任务创建成功：${s.id}「${s.name}」，${when}，Worker: ${s.workerName}。`,
                 },
               ],
               details: {},
@@ -196,21 +216,35 @@ ${workers || "- （暂无 Worker）"}
       defineTool({
         name: "update_schedule",
         label: "修改定时任务",
-        description: "修改定时任务的名称/cron/描述/Worker/启停。",
+        description:
+          "修改定时任务的名称/cron/at/描述/Worker/启停。cron 与 at 二选一；提供 at 会重新武装任务（重新启用并按新时间触发）。",
         parameters: Type.Object({
           id: Type.String({ description: "定时任务 id" }),
           name: Type.Optional(Type.String()),
-          cron: Type.Optional(Type.String()),
+          cron: Type.Optional(Type.String({ description: "5 段 cron 表达式（周期任务），与 at 二选一" })),
+          at: Type.Optional(
+            Type.String({ description: "一次性触发时刻（本地时间 YYYY-MM-DD HH:mm），与 cron 二选一" }),
+          ),
           description: Type.Optional(Type.String()),
           worker: Type.Optional(Type.String()),
           enabled: Type.Optional(Type.Boolean()),
         }),
         execute: async (_id, params) => {
           try {
-            const s = g.updateSchedule(params.id, params);
+            const patch: Partial<ScheduledTask> = {};
+            if (params.name !== undefined) patch.name = params.name;
+            if (params.cron !== undefined) patch.cron = params.cron;
+            if (params.at !== undefined) patch.runAt = params.at;
+            if (params.description !== undefined) patch.description = params.description;
+            if (params.worker !== undefined) patch.workerName = params.worker;
+            if (params.enabled !== undefined) patch.enabled = params.enabled;
+            const s = g.updateSchedule(params.id, patch);
             if (!s) return { content: [{ type: "text", text: `未找到定时任务 ${params.id}` }], details: {} };
+            const when = s.kind === "once" ? `触发时间 ${s.runAt}` : `cron "${s.cron}"`;
             return {
-              content: [{ type: "text", text: `定时任务 ${s.id} 已更新。` }],
+              content: [
+                { type: "text", text: `定时任务 ${s.id} 已更新（${when}${s.enabled ? "" : "，已停用"}）。` },
+              ],
               details: {},
             };
           } catch (e) {

@@ -42,7 +42,7 @@ Circle 采用「单一入口 + 角色分离」的协作架构。使用者只感�
 | 工具 | 作用 | 底层 |
 | --- | --- | --- |
 | `dispatch_task` | 派发执行任务给 Worker | `TeamGateway.dispatch`（含安全复核） |
-| `create_schedule` | 创建定时任务 | `Scheduler.create`（cron 校验） |
+| `create_schedule` | 创建定时任务 | `Scheduler.create`（cron / 一次性 at 校验，二者互斥） |
 | `update_schedule` | 修改定时任务 | `Scheduler.update` |
 | `delete_schedule` | 删除定时任务 | `Scheduler.delete` |
 | `list_tasks` | 查询任务状态 | `TaskStore.summarize` |
@@ -80,9 +80,10 @@ Circle 采用「单一入口 + 角色分离」的协作架构。使用者只感�
 - **确定性实现**（不依赖 LLM）：tick 轮询（默认 30s）+ 轻量 cron 解析器
   （支持 `*`、数字、范围、步长、列表），保证触发可靠；
 - 职责：
-  1. 接受 Coordinator 转交的定时任务增删改（cron 合法性校验）；
+  1. 接受 Coordinator 转交的定时任务增删改（cron / 一次性 at 校验，二者互斥）；
   2. 到期触发：创建 Task → 派发给指定 Worker → 跟进 → 完成后由
-     Coordinator 向用户汇报（通知中带 scheduleId）；
+     Coordinator 向用户汇报（通知中带 scheduleId）；一次性任务触发后自动停用（记录保留可查），
+     宕机错过时宽限期内补触发、超期标记「已错过」；
   3. **系统定时任务**：每日 cron（默认 `0 3 * * *`）执行全量任务状态检查，
      清理**已完成超过 30 天**的任务记录及其任务工作空间（`tasks/<taskId>/`），
      产出物目录（`outputs/<taskId>/`）持久保留。
@@ -270,6 +271,8 @@ sequenceDiagram
 保证 `fire` 后 `nextRunAt` 一定指向未来；tick 判定额外要求 `nextRunAt > lastRunAt`，
 即使 `nextRunAt` 因异常落回过去也不会在同一触发点重复 fire。
 
+**一次性任务（issue #49）**：`kind=once` 的任务以 `runAt`（本地时间 `"YYYY-MM-DD HH:mm"`，与 cron 同为进程本地时区语义）为语义源，`nextRunAt` 由 `runAt` 派生；触发时在派发 Worker **之前**即停用并清空 `nextRunAt`，因此并发 tick 与进程重启都不会二次触发。若进程宕机错过触发时刻，宽限期内（默认 10 分钟，`CIRCLE_ONCE_GRACE_MS` 可调）补触发一次，超期则标记 `missedAt`「已错过」，不再执行，避免陈旧提醒突然打扰。
+
 ### 3.4 安全拦截
 
 ```
@@ -300,6 +303,7 @@ sequenceDiagram
 | 配置 | `src/config.ts` | 环境变量驱动（见 usage.md） |
 | 安全评估 | `src/core/safety.ts` | 破坏性/敏感信息正则规则 + 否定语境处理；确定性、不可绕过 |
 | cron | `src/core/cron.ts` | 5 段 cron 解析、nextRun、matches |
+| 时间工具 | `src/core/time.ts` | 系统时间注入（Agent 时间锚点）+ 一次性任务本地时间 `"YYYY-MM-DD HH:mm"` 解析/格式化 |
 | 任务存储 | `src/core/task-store.ts` | JSON 持久化、状态机、30 天清理 |
 | 定时任务存储 | `src/core/schedule-store.ts` | JSON 持久化、触发历史 |
 | 工作空间 | `src/core/workspace.ts` | Worker 目录/任务工作空间（`tasks/<id>`）/产出物归档（`outputs/<id>`）/过期清理；产出物只读访问（清单 + 文本读取 + 原始字节读取，防目录穿越/二进制拒绝/大小上限） |
@@ -314,8 +318,9 @@ Task: id / title / description / status(received→dispatched→running→comple
       / priority(short|long) / workerName / requestedBy(user|scheduler) / scheduleId?
       / requestChatId / createdAt / startedAt / completedAt / result / error
 
-ScheduledTask: id / name / cron(5段) / description / workerName / enabled
-               / createdAt / lastRunAt / nextRunAt / taskIds[]
+ScheduledTask: id / name / kind(cron|once) / cron(5段，周期) / runAt(一次性本地时间)
+               / description / workerName / enabled / createdAt / lastRunAt / nextRunAt
+               / missedAt / taskIds[]
 ```
 
 ## 6. 安全边界（实现层面）

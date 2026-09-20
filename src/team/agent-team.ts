@@ -399,11 +399,22 @@ export class AgentTeam implements TeamGateway {
 
   // ============ Scheduler 协作 ============
 
-  createSchedule(name: string, cron: string, description: string, worker: string): ScheduledTask {
+  createSchedule(
+    name: string,
+    timing: { cron?: string; at?: string },
+    description: string,
+    worker: string,
+  ): ScheduledTask {
     if (!this.workers.has(worker)) {
       throw new Error(`Worker「${worker}」不存在`);
     }
-    return this.scheduler.create({ name, cron, description, workerName: worker });
+    return this.scheduler.create({
+      name,
+      cron: timing.cron,
+      at: timing.at,
+      description,
+      workerName: worker,
+    });
   }
 
   updateSchedule(id: string, patch: Partial<ScheduledTask>): ScheduledTask | undefined {

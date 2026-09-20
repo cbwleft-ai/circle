@@ -14,7 +14,12 @@ export interface TeamGateway {
    */
   dispatch(worker: string, title: string, description: string, long: boolean): Promise<DispatchResult>;
 
-  createSchedule(name: string, cron: string, description: string, worker: string): ScheduledTask;
+  createSchedule(
+    name: string,
+    timing: { cron?: string; at?: string },
+    description: string,
+    worker: string,
+  ): ScheduledTask;
   updateSchedule(id: string, patch: Partial<ScheduledTask>): ScheduledTask | undefined;
   deleteSchedule(id: string): ScheduledTask | undefined;
 

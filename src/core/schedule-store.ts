@@ -6,6 +6,11 @@ import { join } from "node:path";
 import { log } from "./logger.js";
 import type { ScheduledTask } from "./types.js";
 
+/** 是否为一次性任务（kind 缺省视为 cron，兼容旧数据） */
+export function isOnceSchedule(s: Pick<ScheduledTask, "kind">): boolean {
+  return s.kind === "once";
+}
+
 export class ScheduleStore {
   private schedules: ScheduledTask[] = [];
   private seq = 1;
@@ -25,7 +30,8 @@ export class ScheduleStore {
           schedules: ScheduledTask[];
         };
         this.seq = raw.seq ?? 1;
-        this.schedules = raw.schedules ?? [];
+        // 旧数据（issue #49 前）无 kind 字段，归一化为 cron，保持既有行为不变
+        this.schedules = (raw.schedules ?? []).map((s) => ({ ...s, kind: s.kind ?? "cron" }));
       }
     } catch (e) {
       log.warn("schedule-store", `读取定时任务存储失败，使用空存储: ${(e as Error).message}`);
@@ -48,11 +54,16 @@ export class ScheduleStore {
     const s: ScheduledTask = {
       id: input.id ?? this.nextId(),
       name: input.name,
+      kind: input.kind ?? "cron",
       cron: input.cron,
+      runAt: input.runAt,
       description: input.description,
       workerName: input.workerName,
       enabled: input.enabled ?? true,
       createdAt: Date.now(),
+      lastRunAt: input.lastRunAt,
+      nextRunAt: input.nextRunAt,
+      missedAt: input.missedAt,
       taskIds: input.taskIds ?? [],
     };
     this.schedules.push(s);
@@ -96,8 +107,13 @@ export class ScheduleStore {
     if (list.length === 0) return "暂无定时任务。";
     return list
       .map((s) => {
+        if (isOnceSchedule(s)) {
+          const state = s.missedAt ? "已错过（不再执行）" : s.enabled ? "待触发" : "已触发";
+          const icon = s.missedAt ? "⚠️" : s.enabled ? "⏰" : "✅";
+          return `${icon} ${s.id} ${s.name}（一次性: ${s.runAt ?? "未设置"}，Worker: ${s.workerName}，${state}，已触发 ${s.taskIds.length} 次）`;
+        }
         const next = s.nextRunAt ? new Date(s.nextRunAt).toLocaleString("zh-CN") : "未计算";
-        return `${s.enabled ? "🔁" : "⏸️"} ${s.id} ${s.name}（cron: "${s.cron}", Worker: ${s.workerName}, 下次触发: ${next}, 已触发 ${s.taskIds.length} 次）`;
+        return `${s.enabled ? "🔁" : "⏸️"} ${s.id} ${s.name}（cron: "${s.cron ?? ""}", Worker: ${s.workerName}, 下次触发: ${next}, 已触发 ${s.taskIds.length} 次）`;
       })
       .join("\n");
   }

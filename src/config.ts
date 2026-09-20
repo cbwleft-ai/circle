@@ -17,6 +17,11 @@ export interface AppConfig {
   messageMergeMs: number;
   /** Scheduler 调度 tick 间隔（毫秒） */
   schedulerTickMs: number;
+  /**
+   * 一次性任务错过后的补触发宽限期（毫秒，issue #49）。
+   * 进程重启/宕机错过触发时刻时：宽限期内补触发一次，超期则标记「已错过」不再执行。
+   */
+  onceGraceMs: number;
   /** 每日清理：已完成超过该天数（默认 30）的任务及临时工作空间 */
   cleanupAfterDays: number;
   /** 每日清理 cron（默认每天 03:00） */
@@ -89,6 +94,7 @@ export function loadConfig(): AppConfig {
     statusCheckInterval: envInt("CIRCLE_STATUS_CHECK_INTERVAL", 5),
     messageMergeMs: envInt("CIRCLE_MESSAGE_MERGE_MS", 1500),
     schedulerTickMs: envInt("CIRCLE_SCHEDULER_TICK_MS", 30_000),
+    onceGraceMs: envInt("CIRCLE_ONCE_GRACE_MS", 10 * 60 * 1000),
     cleanupAfterDays: envInt("CIRCLE_CLEANUP_AFTER_DAYS", 30),
     cleanupCron: env("CIRCLE_CLEANUP_CRON") ?? "0 3 * * *",
     taskTimeoutMs: envInt("CIRCLE_TASK_TIMEOUT_MS", 30 * 60 * 1000),

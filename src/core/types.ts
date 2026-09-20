@@ -68,13 +68,23 @@ export interface Task {
   usage?: TaskUsage;
 }
 
+/** 定时任务触发类型：cron=周期性（默认）；once=一次性 */
+export type ScheduleKind = "cron" | "once";
+
 /** 定时任务 */
 export interface ScheduledTask {
   id: string;
   /** 名称（用户可读） */
   name: string;
-  /** 5 段 cron 表达式 */
-  cron: string;
+  /** 触发类型：cron=周期性（默认，兼容旧数据）；once=一次性（issue #49） */
+  kind?: ScheduleKind;
+  /** 5 段 cron 表达式（kind=cron 时必填） */
+  cron?: string;
+  /**
+   * 一次性触发时刻（kind=once 时必填），本地时间 "YYYY-MM-DD HH:mm"（issue #49）。
+   * 与 cron 的时区语义一致（进程本地时区）；nextRunAt 为由此派生的绝对时间戳。
+   */
+  runAt?: string;
   /** 触发的执行指令（派发给 Worker） */
   description: string;
   /** 执行该任务的 Worker 名称 */
@@ -83,6 +93,8 @@ export interface ScheduledTask {
   createdAt: number;
   lastRunAt?: number;
   nextRunAt?: number;
+  /** 一次性任务错过触发（进程宕机且超过宽限期未执行）的标记时间（issue #49） */
+  missedAt?: number;
   /** 历史触发的任务 id */
   taskIds: string[];
 }
