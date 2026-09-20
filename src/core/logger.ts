@@ -13,9 +13,10 @@ export function setLogLevel(level: LogLevel) {
 
 import { appendFileSync, existsSync, mkdirSync, renameSync, statSync } from "node:fs";
 import { dirname } from "node:path";
+import { localDay, localTimestamp } from "./time.js";
 
 let logFile: string | undefined;
-/** 当前写入的日志文件对应的日期（UTC），跨天时轮转归档 */
+/** 当前写入的日志文件对应的日期（本地时区，与 cron/系统时间一致），跨天时轮转归档 */
 let logFileDay = "";
 
 /**
@@ -26,9 +27,9 @@ let logFileDay = "";
 export function setLogFile(file: string): void {
   logFile = file;
   mkdirSync(dirname(file), { recursive: true });
-  logFileDay = new Date().toISOString().slice(0, 10);
+  logFileDay = localDay();
   try {
-    appendFileSync(file, `\n===== Circle 启动 ${new Date().toISOString()} =====\n`);
+    appendFileSync(file, `\n===== Circle 启动 ${localTimestamp()} =====\n`);
   } catch {
     // 文件写入失败不阻塞主流程（仅控制台/内存日志继续）
   }
@@ -37,7 +38,7 @@ export function setLogFile(file: string): void {
 function writeFileLine(line: string): void {
   if (!logFile) return;
   try {
-    const day = new Date().toISOString().slice(0, 10);
+    const day = localDay();
     if (day !== logFileDay) {
       // 跨天：归档昨天的文件，今天的写新文件
       try {
@@ -74,7 +75,7 @@ class RingBuffer {
 export const logBuffer = new RingBuffer();
 
 function ts(): string {
-  return new Date().toISOString();
+  return localTimestamp();
 }
 
 function emit(level: LogLevel, tag: string, msg: string) {
