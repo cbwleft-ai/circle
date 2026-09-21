@@ -1,14 +1,14 @@
 # Circle 测试报告
 
-- 生成时间：2026/9/20 11:09:25
-- 用例总数：66，通过：62，失败：0，跳过：4
-- 总耗时：14.7s
+- 生成时间：2026/9/21 10:28:35
+- 用例总数：70，通过：66，失败：0，跳过：4
+- 总耗时：8.4s
 
 ## 环境信息
 
 - 模型：deepseek / deepseek-v4-flash
 - LLM 端到端用例：跳过
-- Node：v26.0.0
+- Node：v26.8.2
 
 ## 结论
 
@@ -34,12 +34,13 @@
 | U-10 | cron | 非法表达式抛错 | ✅ 通过 | 0.0s |
 | U-11 | cron | matches 判定（清理 cron 本地 03:00） | ✅ 通过 | 0.0s |
 | U-11b | cron | nextRun exclusive：严格晚于 from，防止同一分钟重复触发 | ✅ 通过 | 0.0s |
-| U-11c | cron | 指定日期任务（8月24日）次日不再触发：dom/dow Vixie 语义 | ✅ 通过 | 0.1s |
+| U-11c | cron | 指定日期任务（8月24日）次日不再触发：dom/dow Vixie 语义 | ✅ 通过 | 0.0s |
 | U-12 | 任务存储 | 创建 / 状态流转 / 待办查询 | ✅ 通过 | 0.0s |
 | U-13 | 任务存储 | 清理超过 30 天的已完成任务 | ✅ 通过 | 0.0s |
 | U-13b | 任务存储 | 启动对账：进程重启遗留的进行中任务标记为失败 | ✅ 通过 | 0.0s |
 | U-18 | cron | issue#1 回归：本地 09:00 触发，不再晚 8 小时（nextRun） | ✅ 通过 | 0.0s |
 | U-19 | cron | issue#1 回归：matches 按本地时区判定 | ✅ 通过 | 0.0s |
+| U-49 | 时间工具 | localDay / localTimestamp / systemTimeBlock / timezoneInfo 均按进程本地时区 | ✅ 通过 | 0.0s |
 | U-14 | 定时任务存储 | 创建 / 更新 / 删除 | ✅ 通过 | 0.0s |
 | U-14c | 汇报摘要 | 长文本头尾兼顾，短文本原样返回 | ✅ 通过 | 0.0s |
 | U-15 | 工作空间 | Worker 独立目录 + 任务级会话工作空间隔离 + 产出物归档 | ✅ 通过 | 0.0s |
@@ -48,29 +49,32 @@
 | U-30 | 产出物发送 | sendArtifact：文件直发 / 文本降级 / 边界校验 | ✅ 通过 | 0.0s |
 | U-16 | Scheduler | 创建定时任务并立即触发 | ✅ 通过 | 0.0s |
 | U-16b | Scheduler | 长任务期间并发 tick 不重复触发（回归：S-MT1CIX4S-001 竞态） | ✅ 通过 | 0.5s |
-| U-16c | Scheduler | 8月24日的任务，8月25日不再触发（指定日期 cron 回归） | ✅ 通过 | 0.1s |
+| U-16c | Scheduler | 8月24日的任务，8月25日不再触发（指定日期 cron 回归） | ✅ 通过 | 0.0s |
 | U-44 | Scheduler | 一次性任务触发后自动停用，后续 tick 不再触发（issue #49） | ✅ 通过 | 0.0s |
 | U-45 | Scheduler | cron/at 互斥与一次性时间校验（格式/非法日期/过去时间） | ✅ 通过 | 0.0s |
 | U-46 | Scheduler | 一次性错过策略：宽限期内补触发，超期标记已错过 | ✅ 通过 | 0.0s |
 | U-47 | Scheduler | 旧 schedules.json 兼容 + 启动时从 runAt 重算 nextRunAt | ✅ 通过 | 0.0s |
 | U-48 | Scheduler | update 切换 cron/一次性 与 re-arm | ✅ 通过 | 0.0s |
+| U-16d | Scheduler | 启动即到达清理时刻不因 60s 防重漏执行（回归） | ✅ 通过 | 0.0s |
 | U-34 | 模型配置 | Coordinator/Worker 可独立配置模型（回退全局） | ✅ 通过 | 0.0s |
 | U-31 | 多模态 | 附件落盘与消息富化（AttachmentStore + buildMessageWithAttachments） | ✅ 通过 | 0.0s |
 | U-33 | 多模态 | 派发附加图片 buildDispatchWithAttachments | ✅ 通过 | 0.0s |
 | U-32 | 多模态 | Worker 图片输入 loadTaskImages（读取/损坏跳过/默认 MIME） | ✅ 通过 | 0.0s |
 | U-35 | 多模态 | Coordinator 提示词含多模态派发规则（图片标记→派发 Worker） | ✅ 通过 | 0.0s |
-| U-36 | 多模态 | 微信图片附件提取：url / full_url / media 字符串 / media 加密对象（AES 解密） | ✅ 通过 | 0.3s |
+| U-36 | 多模态 | 微信图片附件提取：url / full_url / media 字符串 / media 加密对象（AES 解密） | ✅ 通过 | 0.1s |
 | U-40 | 消息合并 | mergeMessages：合并文本与附件（纯函数） | ✅ 通过 | 0.0s |
 | U-41 | 消息合并 | MessageMerger：附件启动窗口，窗口内消息合并为一批 | ✅ 通过 | 0.0s |
 | U-43 | 消息合并 | 纯文本消息零延迟：不等待合并窗口，附件后到则分开处理 | ✅ 通过 | 1.0s |
 | U-42 | 消息合并 | MessageMerger：窗口=0 时逐条立即处理（合并关闭） | ✅ 通过 | 0.0s |
+| U-50 | 会话隔离 | 任务数据按会话归属：列表/读取/发送拒绝跨会话 | ✅ 通过 | 0.0s |
+| U-51 | 会话隔离 | 定时任务归属：创建/列表/修改/删除按会话鉴权 | ✅ 通过 | 0.0s |
 | U-17 | IM 适配器 | TestAdapter 注入与等待 | ✅ 通过 | 0.0s |
 | U-20 | 微信官方通道 | 扫码登录：二维码 → 轮询 → confirmed → 保存账户 | ✅ 通过 | 2.0s |
 | U-21 | 微信官方通道 | 消息接收：getupdates → onMessage 回调 | ✅ 通过 | 0.5s |
-| U-22 | 微信官方通道 | 消息发送：sendmessage + markdown 清洗 | ✅ 通过 | 3.0s |
+| U-22 | 微信官方通道 | 消息发送：sendmessage + markdown 清洗 | ✅ 通过 | 0.0s |
 | U-23 | 微信官方通道 | 缓存恢复：重启后不重复扫码 | ✅ 通过 | 2.0s |
 | U-28 | 微信官方通道 | 文件发送：getuploadurl → CDN 加密上传 → type 4 文件消息 | ✅ 通过 | 0.0s |
-| U-29 | 微信官方通道 | 图片发送：type 2 图片消息（media_type=1） | ✅ 通过 | 3.0s |
+| U-29 | 微信官方通道 | 图片发送：type 2 图片消息（media_type=1） | ✅ 通过 | 0.0s |
 | U-30 | 微信官方通道 | 引用消息解析：title 摘要 + 被引用文本/媒体（issue #25） | ✅ 通过 | 0.5s |
 | U-31 | 微信官方通道 | 多条 item 合并：引用内容以独立 item 下发时不丢用户指令（issue #25） | ✅ 通过 | 0.5s |
 | U-32 | 微信官方通道 | 真实 iLink 引用载荷：type=0 仅 msg_id，注册表还原 + 兜底占位 + 大整数 id 解析（issue #25） | ✅ 通过 | 0.5s |
@@ -251,6 +255,12 @@ nextRun("0 9 * * *", 本地 00:00) → 2025/1/1 09:00:00（本地 09:00，不再
 matches 已按本地时区判定，旧 UTC 误匹配已消除
 ```
 
+### U-49 localDay / localTimestamp / systemTimeBlock / timezoneInfo 均按进程本地时区
+
+```
+时区: Asia/Shanghai (UTC+8)；本地时间戳: 2026-09-20T15:01:44.123+08:00
+```
+
 ### U-14 创建 / 更新 / 删除
 
 ```
@@ -278,7 +288,7 @@ matches 已按本地时区判定，旧 UTC 误匹配已消除
 ### U-27 TeamGateway：listArtifacts / readArtifact / getTaskResult
 
 ```
-任务 T-20260920-0001「生成报告」产出物清单（2 个文件）：
+任务 T-20260921-0001「生成报告」产出物清单（2 个文件）：
   📄 raw.log（11 B）
   📄 report.md（36 B）
 ```
@@ -332,6 +342,12 @@ matches 已按本地时区判定，旧 UTC 误匹配已消除
 ```
 
 ### U-48 update 切换 cron/一次性 与 re-arm
+
+```
+通过
+```
+
+### U-16d 启动即到达清理时刻不因 60s 防重漏执行（回归）
 
 ```
 通过
@@ -392,6 +408,18 @@ url 直链 ✅ / full_url+aes_key 解密 ✅ / aeskey(hex) 解密 ✅ / media �
 ```
 
 ### U-42 MessageMerger：窗口=0 时逐条立即处理（合并关闭）
+
+```
+通过
+```
+
+### U-50 任务数据按会话归属：列表/读取/发送拒绝跨会话
+
+```
+通过
+```
+
+### U-51 定时任务归属：创建/列表/修改/删除按会话鉴权
 
 ```
 通过

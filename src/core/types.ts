@@ -89,6 +89,8 @@ export interface ScheduledTask {
   description: string;
   /** 执行该任务的 Worker 名称 */
   workerName: string;
+  /** 创建者所在会话（定时任务触发结果回流；缺省回落到默认会话） */
+  ownerChatId?: string;
   enabled: boolean;
   createdAt: number;
   lastRunAt?: number;

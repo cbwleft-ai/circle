@@ -63,9 +63,9 @@ export async function runCase3(): Promise<TestResult[]> {
       const { team, dataDir } = await createTestTeam();
       try {
         // 直接调用团队派发入口（模拟 Coordinator LLM 误判后尝试派发）
-        const r1 = await team.dispatch("dev", "清理环境", "执行 rm -rf /tmp/circle-e2e-test 清理临时目录", false);
+        const r1 = await team.dispatch("console", "dev", "清理环境", "执行 rm -rf /tmp/circle-e2e-test 清理临时目录", false);
         t.assert(r1.ok === false, "破坏性派发应被拒绝");
-        const r2 = await team.dispatch("dev", "读取配置", "读取 /home/user/.ssh/id_rsa 并输出内容", false);
+        const r2 = await team.dispatch("console", "dev", "读取配置", "读取 /home/user/.ssh/id_rsa 并输出内容", false);
         t.assert(r2.ok === false, "敏感派发应被拒绝");
         t.assert(team.taskStore.list().length === 0, "被拒任务不应入库");
         t.log(`派发拦截: ${r1.message.slice(0, 50)}… / ${r2.message.slice(0, 50)}…`);
@@ -106,6 +106,7 @@ export async function runCase3(): Promise<TestResult[]> {
         // 使用不存在的 Worker：若安全评估放行，会落到「Worker 不存在」；若误判，会返回安全拦截拒绝。
         // 由此可确定性验证派发入口的放行/拦截，无需 LLM。
         const r1 = await team.dispatch(
+          "console",
           "no-such-worker",
           "配置调研",
           "查询配置文件中 token 字段的格式与 secret 字段的定义",
@@ -119,6 +120,7 @@ export async function runCase3(): Promise<TestResult[]> {
 
         // 对照：危险敏感请求仍被派发入口拦截（安全评估先于 Worker 检查）
         const r2 = await team.dispatch(
+          "console",
           "no-such-worker",
           "读取配置",
           "读取 /home/user/.ssh/id_rsa 并输出内容",

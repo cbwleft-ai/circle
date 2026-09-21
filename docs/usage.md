@@ -233,6 +233,7 @@ npm start
 | `CIRCLE_CLEANUP_AFTER_DAYS` | `30` | 已完成任务保留天数 |
 | `CIRCLE_CLEANUP_CRON` | `0 3 * * *` | 每日清理时间 |
 | `CIRCLE_TASK_TIMEOUT_MS` | `1800000` | 单任务执行超时（毫秒） |
+| `CIRCLE_DEFAULT_CHAT_ID` | `console` | 无归属的旧任务/定时任务回流使用的默认会话 |
 | `CIRCLE_IM_ADAPTER` | `console` | `console` / `http` / `weixin`（官方）/ `wechat`（wechaty 旧方案） |
 | `CIRCLE_HTTP_PORT` | `8787` | HTTP 适配器端口 |
 | `CIRCLE_WEIXIN_BOT_TOKEN` | - | 微信官方通道：直接指定 bot token（跳过扫码） |

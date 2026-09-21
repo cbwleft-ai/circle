@@ -65,13 +65,14 @@ export class TaskStore {
     return this.tasks.find((t) => t.id === id);
   }
 
-  list(filter?: { status?: TaskStatus | TaskStatus[]; worker?: string }): Task[] {
+  list(filter?: { status?: TaskStatus | TaskStatus[]; worker?: string; requestChatId?: string }): Task[] {
     let out = this.tasks;
     if (filter?.status) {
       const statuses = Array.isArray(filter.status) ? filter.status : [filter.status];
       out = out.filter((t) => statuses.includes(t.status));
     }
     if (filter?.worker) out = out.filter((t) => t.workerName === filter.worker);
+    if (filter?.requestChatId) out = out.filter((t) => t.requestChatId === filter.requestChatId);
     return [...out].sort((a, b) => b.createdAt - a.createdAt);
   }
 
@@ -156,7 +157,7 @@ export class TaskStore {
   }
 
   /** 任务摘要（供 Coordinator 汇报） */
-  summarize(filter?: { status?: TaskStatus | TaskStatus[] }): string {
+  summarize(filter?: { status?: TaskStatus | TaskStatus[]; requestChatId?: string }): string {
     const tasks = this.list(filter);
     if (tasks.length === 0) return "暂无任务。";
     const lines = tasks.map((t) => {

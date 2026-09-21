@@ -687,24 +687,24 @@ export async function runUnitTests(): Promise<TestResult[]> {
           team.workspace.archiveTaskOutput("dev", task.id);
 
           // listArtifacts：包含文件与大小
-          const manifest = team.listArtifacts(task.id);
+          const manifest = team.listArtifacts("chat-1", task.id);
           t.assert(manifest.includes("report.md"), `清单应含 report.md：${manifest}`);
           t.assert(manifest.includes("raw.log"), "清单应含 raw.log");
           t.assert(manifest.includes("B"), "清单应含大小信息");
 
           // readArtifact：读取内容；越界路径拒绝
-          const content = team.readArtifact(task.id, "report.md");
+          const content = team.readArtifact("chat-1", task.id, "report.md");
           t.assert(content.includes("关键结论：全部通过"), "应能读取产出物内容");
-          const denied = team.readArtifact(task.id, "../../outside.txt");
+          const denied = team.readArtifact("chat-1", task.id, "../../outside.txt");
           t.assert(denied.includes("读取失败"), "越界路径应返回读取失败");
 
           // getTaskResult：完整结果未被截断
-          const full = team.getTaskResult(task.id);
+          const full = team.getTaskResult("chat-1", task.id);
           t.assert(full === "完整结果全文：已完成，产出 report.md（此文本不应被截断）", "应返回完整结果");
 
           // 未知任务
-          t.assert(team.listArtifacts("T-NO-SUCH").includes("不存在"), "未知任务应提示不存在");
-          t.assert(team.getTaskResult("T-NO-SUCH") === undefined, "未知任务完整结果应为 undefined");
+          t.assert(team.listArtifacts("chat-1", "T-NO-SUCH").includes("不存在"), "未知任务应提示不存在");
+          t.assert(team.getTaskResult("chat-1", "T-NO-SUCH") === undefined, "未知任务完整结果应为 undefined");
           t.log(manifest);
         } finally {
           await team.stop();
@@ -764,7 +764,7 @@ export async function runUnitTests(): Promise<TestResult[]> {
           team.workspace.archiveTaskOutput("dev", task.id);
 
           // 1) 文本文件直发：文件名 / 内容 / MIME / caption
-          const r1 = await team.sendArtifact(task.id, "report.md", "这是最终报告");
+          const r1 = await team.sendArtifact("chat-1", task.id, "report.md", "这是最终报告");
           t.assert(r1.ok, `报告应发送成功：${r1.message}`);
           const f1 = sentFiles[0]!;
           t.assertEqual(f1.fileName, "report.md", "文件名应为 report.md");
@@ -774,18 +774,18 @@ export async function runUnitTests(): Promise<TestResult[]> {
           t.assertEqual(f1.size, Buffer.byteLength(report), "size 应正确");
 
           // 2) 图片文件：MIME 识别 + 默认 caption
-          const r2 = await team.sendArtifact(task.id, "chart.png");
+          const r2 = await team.sendArtifact("chat-1", task.id, "chart.png");
           t.assert(r2.ok, `图片应发送成功：${r2.message}`);
           const f2 = sentFiles[1]!;
           t.assertEqual(f2.mimeType, "image/png", "图片 MIME 应为 image/png");
           t.assert((f2.caption ?? "").includes("任务"), "默认 caption 应含任务信息");
 
           // 3) 越界路径 / 未知任务 / 超大文件被拒
-          const r3 = await team.sendArtifact(task.id, "../../outside.txt");
+          const r3 = await team.sendArtifact("chat-1", task.id, "../../outside.txt");
           t.assert(!r3.ok && r3.message.includes("无法发送"), "越界路径应被拒绝");
-          const r4 = await team.sendArtifact("T-NO-SUCH", "a.txt");
+          const r4 = await team.sendArtifact("chat-1", "T-NO-SUCH", "a.txt");
           t.assert(!r4.ok && r4.message.includes("不存在"), "未知任务应报错");
-          const r5 = await team.sendArtifact(task.id, "big.bin");
+          const r5 = await team.sendArtifact("chat-1", task.id, "big.bin");
           t.assert(!r5.ok && r5.message.includes("过大"), "超过 20MB 应被拒绝");
 
           // 4) 不提供 sendFile 的团队：自动降级为文本，不抛异常
@@ -813,7 +813,7 @@ export async function runUnitTests(): Promise<TestResult[]> {
             const ws2 = team2.workspace.taskWorkspaceDir("dev", task2.id);
             writeFileSync(join(ws2, "data.csv"), "id,name\n1,a");
             team2.workspace.archiveTaskOutput("dev", task2.id);
-            const r6 = await team2.sendArtifact(task2.id, "data.csv");
+            const r6 = await team2.sendArtifact("chat-2", task2.id, "data.csv");
             t.assert(!r6.ok, "无文件通道应返回 ok=false（已降级）");
             t.assert(
               sentTexts.some((x) => x.includes("data.csv") && x.includes("已生成产出物文件")),
@@ -1656,6 +1656,108 @@ export async function runUnitTests(): Promise<TestResult[]> {
         caught = true;
       }
       t.assert(caught, "处理失败应向上抛给 push 调用方");
+    }),
+  );
+
+  // ---------- 会话隔离（issue #53） ----------
+  results.push(
+    await runCase("U-50", "会话隔离", "任务数据按会话归属：列表/读取/发送拒绝跨会话", async (t) => {
+      const dir = mkdtempSync(join(tmpdir(), "circle-unit-isolation-"));
+      try {
+        const { AgentTeam } = await import("../src/team/agent-team.js");
+        const { loadConfig } = await import("../src/config.js");
+        const team = new AgentTeam({
+          config: { ...loadConfig(), dataDir: dir },
+          workers: [{ name: "dev", description: "dev", cwd: join(dir, "workspaces", "dev") }],
+          outbox: async () => {},
+          modelRuntime: undefined as never,
+        });
+        try {
+          const a = team.taskStore.create({
+            title: "A 的任务",
+            description: "x",
+            status: "completed",
+            priority: "short",
+            workerName: "dev",
+            requestedBy: "user",
+            requestChatId: "chat-a",
+            result: "A 结果",
+            completedAt: Date.now(),
+          });
+          const b = team.taskStore.create({
+            title: "B 的任务",
+            description: "x",
+            status: "completed",
+            priority: "short",
+            workerName: "dev",
+            requestedBy: "user",
+            requestChatId: "chat-b",
+            result: "B 结果",
+            completedAt: Date.now(),
+          });
+          const listA = team.listTasks("chat-a");
+          t.assert(listA.includes(a.id) && !listA.includes(b.id), `A 会话列表不应含 B 的任务：${listA}`);
+          t.assert(team.getTaskResult("chat-a", b.id) === undefined, "跨会话任务结果应不可见");
+          t.assert(team.listArtifacts("chat-a", b.id).includes("无权访问"), "跨会话产出物清单应拒绝");
+          t.assert(!(await team.sendArtifact("chat-a", b.id, "x.txt")).ok, "跨会话发送产出物应拒绝");
+          const legacy = team.taskStore.create({
+            title: "旧任务",
+            description: "x",
+            status: "completed",
+            priority: "short",
+            workerName: "dev",
+            requestedBy: "user",
+            result: "legacy",
+            completedAt: Date.now(),
+          });
+          t.assert(team.getTaskResult("chat-a", legacy.id) === "legacy", "无归属旧任务应可访问");
+        } finally {
+          await team.stop();
+        }
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }),
+  );
+
+  results.push(
+    await runCase("U-51", "会话隔离", "定时任务归属：创建/列表/修改/删除按会话鉴权", async (t) => {
+      const dir = mkdtempSync(join(tmpdir(), "circle-unit-sched-isolation-"));
+      try {
+        const { AgentTeam } = await import("../src/team/agent-team.js");
+        const { loadConfig } = await import("../src/config.js");
+        const team = new AgentTeam({
+          config: { ...loadConfig(), dataDir: dir },
+          workers: [{ name: "dev", description: "dev", cwd: join(dir, "workspaces", "dev") }],
+          outbox: async () => {},
+          modelRuntime: undefined as never,
+        });
+        try {
+          const s = team.createSchedule("chat-a", "每日检查", { cron: "0 10 * * *" }, "echo hi", "dev");
+          t.assertEqual(s.ownerChatId, "chat-a", "ownerChatId 应为 chat-a");
+          t.assert(team.listSchedules("chat-a").includes(s.id), "A 会话应看到自己的定时任务");
+          t.assert(!team.listSchedules("chat-b").includes(s.id), "B 会话不应看到 A 的定时任务");
+          let denied = false;
+          try {
+            team.updateSchedule("chat-b", s.id, { name: "hack" });
+          } catch {
+            denied = true;
+          }
+          t.assert(denied, "跨会话修改应被拒绝");
+          denied = false;
+          try {
+            team.deleteSchedule("chat-b", s.id);
+          } catch {
+            denied = true;
+          }
+          t.assert(denied, "跨会话删除应被拒绝");
+          t.assert(team.updateSchedule("chat-a", s.id, { name: "A 修改" })?.name === "A 修改", "所属会话应可修改");
+        } finally {
+          await team.stop();
+        }
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
     }),
   );
 

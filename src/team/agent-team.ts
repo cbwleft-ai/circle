@@ -62,8 +62,7 @@ export class AgentTeam implements TeamGateway {
   readonly attachmentStore: AttachmentStore;
 
   private turnCount = 0;
-  private currentChatId = "console";
-  /** 串行化所有 Coordinator 会话操作 */
+  /** 串行化所有 Coordinator 会话操作（正确性优先；跨会话并行后置） */
   private coordinatorQueue: Promise<unknown> = Promise.resolve();
   /**
    * 各会话最近一次携带图片附件的落盘路径（issue #3）：
@@ -137,7 +136,7 @@ export class AgentTeam implements TeamGateway {
     // 按 requestChatId 分组，避免打扰无关会话
     const byChat = new Map<string, Task[]>();
     for (const t of interrupted) {
-      const chatId = t.requestChatId ?? this.currentChatId;
+      const chatId = t.requestChatId ?? this.config.defaultChatId;
       const list = byChat.get(chatId) ?? [];
       list.push(t);
       byChat.set(chatId, list);
@@ -150,7 +149,7 @@ export class AgentTeam implements TeamGateway {
       const notification = `（系统通知）系统已重启。上次进程中断时有 ${tasks.length} 个任务未完成，已标记为失败：\n${summary}\n\n请告知用户：这些任务如需重新执行，用户可以提出，我会重新派发。`;
       try {
         const reply = await this.enqueueCoordinator(() =>
-          this.coordinator.respond(notification),
+          this.coordinator.respond(chatId, notification),
         );
         if (reply) await this.outbox(chatId, reply);
       } catch (e) {
@@ -181,7 +180,7 @@ export class AgentTeam implements TeamGateway {
    * Coordinator 只回复一次；窗口为 0（CIRCLE_MESSAGE_MERGE_MS=0）时退化为逐条处理。
    */
   async handleUserMessage(msg: ChatMessage): Promise<void> {
-    this.currentChatId = msg.chatId;
+    // chatId 由消息本身携带，不再维护全局可变状态
     await this.messageMerger.push(msg);
   }
 
@@ -225,18 +224,25 @@ export class AgentTeam implements TeamGateway {
     }
 
     // 2) Coordinator 处理（文本已富化：附件路径以【图片】标记注入）
-    const reply = await this.enqueueCoordinator(() => this.coordinator.respond(coordinatorText));
+    const reply = await this.enqueueCoordinator(() =>
+      this.coordinator.respond(msg.chatId, coordinatorText),
+    );
     if (reply) await this.outbox(msg.chatId, reply);
 
-    // 3) 每 N 轮对话检查一次待办任务状态（长程任务跟进）
+    // 3) 每 N 轮对话检查一次当前会话的待办任务状态（长程任务跟进）
     if (this.turnCount % this.config.statusCheckInterval === 0) {
-      const pending = this.taskStore.pending();
+      const pending = this.taskStore.list({
+        status: ["received", "dispatched", "running"],
+        requestChatId: msg.chatId,
+      });
       if (pending.length > 0) {
         const summary = this.taskStore.summarize({
           status: ["received", "dispatched", "running"],
+          requestChatId: msg.chatId,
         });
         const statusReply = await this.enqueueCoordinator(() =>
           this.coordinator.respond(
+            msg.chatId,
             `（系统提醒：已到第 ${this.turnCount} 轮对话，请检查以下待办任务状态并向用户汇报最新进展）\n${summary}`,
           ),
         );
@@ -255,6 +261,12 @@ export class AgentTeam implements TeamGateway {
     return result;
   }
 
+  /** 任务数据归属校验：无归属的旧数据放行，保证迁移期仍可按 id 访问 */
+  private canAccessTask(chatId: string, task: Task): boolean {
+    if (!task.requestChatId) return true;
+    return task.requestChatId === chatId;
+  }
+
   // ============ TeamGateway 实现（Coordinator 工具回调） ============
 
   listWorkers(): WorkerConfig[] {
@@ -262,6 +274,7 @@ export class AgentTeam implements TeamGateway {
   }
 
   async dispatch(
+    chatId: string,
     workerName: string,
     title: string,
     description: string,
@@ -295,7 +308,7 @@ export class AgentTeam implements TeamGateway {
     // 长程判定：Coordinator 标记 或 启发式兜底
     const long = longFlag || LONG_TASK_PATTERNS.some((re) => re.test(description));
     // 多模态：把该会话最近一次图片附件确定性附加到任务（不依赖 LLM 转述路径，issue #3）
-    const pending = this.pendingAttachments.get(this.currentChatId) ?? [];
+    const pending = this.pendingAttachments.get(chatId) ?? [];
     const { description: finalDescription, attachments } = buildDispatchWithAttachments(description, pending);
     const task = this.taskStore.create({
       title,
@@ -304,7 +317,7 @@ export class AgentTeam implements TeamGateway {
       priority: long ? "long" : "short",
       workerName,
       requestedBy: "user",
-      requestChatId: this.currentChatId,
+      requestChatId: chatId,
       attachments,
     });
     log.info("team", `创建任务 ${task.id}「${title}」→ ${workerName}（${task.priority}）`);
@@ -382,11 +395,13 @@ export class AgentTeam implements TeamGateway {
 
   /** 任务完成/失败 → 注入系统通知 → Coordinator 汇总 → 发送给发起用户 */
   private async reportCompletion(task: Task, result: string, failed: boolean): Promise<void> {
-    const chatId = task.requestChatId ?? this.currentChatId;
+    const chatId = task.requestChatId ?? this.config.defaultChatId;
     const statusWord = failed ? "失败" : "完成";
     const notification = `（系统通知）Worker「${task.workerName}」报告：任务 ${task.id}「${task.title}」已${statusWord}。\n执行结果（摘要）：\n${summarizeText(result)}\n\n如用户需要核对完整结果或 Worker 实际产出，可直接调用以下工具读取（无需让 Worker 转述）：\n- task_result：读取完整执行结果（未截断）\n- list_artifacts：查看产出物文件清单（路径 + 大小）\n- read_artifact：读取指定产出物文件内容\n\n请整理后向用户汇报最终结果。`;
     try {
-      const reply = await this.enqueueCoordinator(() => this.coordinator.respond(notification));
+      const reply = await this.enqueueCoordinator(() =>
+        this.coordinator.respond(chatId, notification),
+      );
       if (reply) await this.outbox(chatId, reply);
     } catch (e) {
       log.error("team", `任务结果汇报失败: ${(e as Error).message}`);
@@ -400,6 +415,7 @@ export class AgentTeam implements TeamGateway {
   // ============ Scheduler 协作 ============
 
   createSchedule(
+    chatId: string,
     name: string,
     timing: { cron?: string; at?: string },
     description: string,
@@ -414,34 +430,48 @@ export class AgentTeam implements TeamGateway {
       at: timing.at,
       description,
       workerName: worker,
+      ownerChatId: chatId,
     });
   }
 
-  updateSchedule(id: string, patch: Partial<ScheduledTask>): ScheduledTask | undefined {
+  updateSchedule(chatId: string, id: string, patch: Partial<ScheduledTask>): ScheduledTask | undefined {
+    const existing = this.scheduleStore.get(id);
+    if (!existing) return undefined;
+    if ((existing.ownerChatId ?? this.config.defaultChatId) !== chatId) {
+      throw new Error(`无权修改定时任务 ${id}（属于其它会话）`);
+    }
     return this.scheduler.update(id, patch);
   }
 
-  deleteSchedule(id: string): ScheduledTask | undefined {
+  deleteSchedule(chatId: string, id: string): ScheduledTask | undefined {
+    const existing = this.scheduleStore.get(id);
+    if (!existing) return undefined;
+    if ((existing.ownerChatId ?? this.config.defaultChatId) !== chatId) {
+      throw new Error(`无权删除定时任务 ${id}（属于其它会话）`);
+    }
     return this.scheduler.delete(id);
   }
 
-  listTasks(status?: string): string {
+  listTasks(chatId: string, status?: string): string {
     const valid = ["received", "dispatched", "running", "completed", "failed", "rejected"];
-    if (status && valid.includes(status)) {
-      return this.taskStore.summarize({ status: status as Task["status"] });
-    }
-    return this.taskStore.summarize();
+    const statusPatch: { status?: Task["status"] } =
+      status && valid.includes(status) ? { status: status as Task["status"] } : {};
+    return this.taskStore.summarize({ ...statusPatch, requestChatId: chatId });
   }
 
-  listSchedules(): string {
-    return this.scheduleStore.summarize();
+  listSchedules(chatId: string): string {
+    return this.scheduleStore.summarize({
+      ownerChatId: chatId,
+      legacyOwnerChatId: this.config.defaultChatId,
+    });
   }
 
   // ============ 产出物访问（issue #21：Coordinator 直接读取 Worker 完整产出） ============
 
-  listArtifacts(taskId: string): string {
+  listArtifacts(chatId: string, taskId: string): string {
     const task = this.taskStore.get(taskId);
     if (!task) return `任务 ${taskId} 不存在。`;
+    if (!this.canAccessTask(chatId, task)) return `任务 ${taskId} 不存在或无权访问。`;
     const entries = this.workspace.listTaskArtifacts(task.workerName, taskId);
     if (entries.length === 0) {
       return `任务 ${taskId}「${task.title}」暂无产出物文件。`;
@@ -457,9 +487,10 @@ export class AgentTeam implements TeamGateway {
     return lines.join("\n");
   }
 
-  readArtifact(taskId: string, relPath: string): string {
+  readArtifact(chatId: string, taskId: string, relPath: string): string {
     const task = this.taskStore.get(taskId);
     if (!task) return `任务 ${taskId} 不存在。`;
+    if (!this.canAccessTask(chatId, task)) return `任务 ${taskId} 不存在或无权访问。`;
     const res = this.workspace.readTaskArtifact(task.workerName, taskId, relPath);
     if (!res.ok) return `读取失败：${res.error}`;
     const truncatedNote = res.truncated
@@ -468,14 +499,24 @@ export class AgentTeam implements TeamGateway {
     return `文件 ${relPath}（${formatBytes(res.size ?? 0)}${truncatedNote}）：\n\n${res.content}`;
   }
 
-  getTaskResult(taskId: string): string | undefined {
-    return this.taskStore.get(taskId)?.result;
+  getTaskResult(chatId: string, taskId: string): string | undefined {
+    const task = this.taskStore.get(taskId);
+    if (!task || !this.canAccessTask(chatId, task)) return undefined;
+    return task.result;
   }
 
-  async sendArtifact(taskId: string, relPath: string, caption?: string): Promise<SendArtifactResult> {
+  async sendArtifact(
+    chatId: string,
+    taskId: string,
+    relPath: string,
+    caption?: string,
+  ): Promise<SendArtifactResult> {
     const task = this.taskStore.get(taskId);
     if (!task) {
       return { ok: false, message: `任务 ${taskId} 不存在，无法发送产出物。` };
+    }
+    if (!this.canAccessTask(chatId, task)) {
+      return { ok: false, message: `任务 ${taskId} 不存在或无权访问。` };
     }
     const read = this.workspace.readTaskArtifactBuffer(task.workerName, taskId, relPath);
     if (!read.ok || !read.buffer) {
@@ -490,11 +531,11 @@ export class AgentTeam implements TeamGateway {
       caption: caption ?? `任务 ${taskId}「${task.title}」的产出物：${fileName}`,
       sourcePath: this.workspace.taskArtifactRoot(task.workerName, taskId),
     };
-    const chatId = task.requestChatId ?? this.currentChatId;
+    const targetChatId = task.requestChatId ?? this.config.defaultChatId;
     if (this.sendFile) {
       try {
-        await this.sendFile(chatId, file);
-        log.info("team", `任务 ${taskId} 产出物已发送 → ${chatId}: ${fileName}（${file.size} B）`);
+        await this.sendFile(targetChatId, file);
+        log.info("team", `任务 ${taskId} 产出物已发送 → ${targetChatId}: ${fileName}（${file.size} B）`);
         return {
           ok: true,
           message: `产出物 ${fileName} 已作为文件发送给用户（${file.size} 字节）。`,
@@ -508,7 +549,7 @@ export class AgentTeam implements TeamGateway {
     // 通道不支持文件或发送失败 → 文本降级
     const fallback = `已生成产出物文件 ${fileName}（${file.size} 字节）${file.sourcePath ? `，完整文件位于 ${file.sourcePath}` : ""}。当前通道无法直接发送文件，如需内容可用 read_artifact 读取。`;
     try {
-      await this.outbox(chatId, fallback);
+      await this.outbox(targetChatId, fallback);
     } catch (e) {
       return { ok: false, message: `产出物发送失败：${(e as Error).message}` };
     }
@@ -531,7 +572,7 @@ export class AgentTeam implements TeamGateway {
       workerName: schedule.workerName,
       requestedBy: "scheduler",
       scheduleId: schedule.id,
-      requestChatId: this.currentChatId,
+      requestChatId: schedule.ownerChatId ?? this.config.defaultChatId,
     });
     this.scheduleStore.addTaskRecord(schedule.id, task.id);
     const workspace = this.workspace.taskWorkspaceDir(schedule.workerName, task.id);
