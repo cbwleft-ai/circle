@@ -59,15 +59,15 @@ async function main() {
   await coordinator.start();
 
   console.log("对话 1: 普通问候");
-  const r1 = await coordinator.respond("你好，请用一句话介绍你自己");
+  const r1 = await coordinator.respond("smoke", "你好，请用一句话介绍你自己");
   console.log(`>>> ${r1}`);
 
   console.log("\n对话 2: 派发任务（应调用 dispatch 工具）");
-  const r2 = await coordinator.respond("派一个短程任务给 dev Worker：创建一个 hello.txt 写入 'hi'");
+  const r2 = await coordinator.respond("smoke", "派一个短程任务给 dev Worker：创建一个 hello.txt 写入 'hi'");
   console.log(`>>> ${r2}`);
 
   console.log("\n对话 3: 创建定时任务");
-  const r3 = await coordinator.respond("创建一个定时任务，每天上午 9 点执行备份，cron 为 0 9 * * *");
+  const r3 = await coordinator.respond("smoke", "创建一个定时任务，每天上午 9 点执行备份，cron 为 0 9 * * *");
   console.log(`>>> ${r3}`);
 
   await coordinator.dispose();
