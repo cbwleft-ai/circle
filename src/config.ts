@@ -63,6 +63,8 @@ export interface AppConfig {
   feishu: {
     appId?: string;
     appSecret?: string;
+    /** 接入方式：ws=WebSocket 长连接（默认，免公网入口）；webhook=事件订阅回调 */
+    mode: "ws" | "webhook";
     /** 事件订阅验证 token（webhook 模式） */
     verificationToken?: string;
     /** 事件加密密钥（可选；配置后按 AES-256-CBC 解密事件体） */
@@ -140,6 +142,7 @@ export function loadConfig(): AppConfig {
         .filter(Boolean),
     },
     feishu: {
+      mode: (env("CIRCLE_FEISHU_MODE") as "ws" | "webhook" | undefined) ?? "ws",
       appId: env("CIRCLE_FEISHU_APP_ID"),
       appSecret: env("CIRCLE_FEISHU_APP_SECRET"),
       verificationToken: env("CIRCLE_FEISHU_VERIFICATION_TOKEN"),

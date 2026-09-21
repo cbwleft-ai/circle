@@ -67,13 +67,13 @@ function createAdapter(kind: ReturnType<typeof loadConfig>["imAdapter"], config:
     case "http":
       return new HttpAdapter(config.httpPort);
     case "feishu": {
-      const { appId, appSecret, verificationToken, encryptKey, port, eventPath, botOpenId, baseUrl } = config.feishu;
+      const { mode, appId, appSecret, verificationToken, encryptKey, port, eventPath, botOpenId, baseUrl } = config.feishu;
       if (!appId || !appSecret) {
         throw new Error(
           "飞书适配器需要 CIRCLE_FEISHU_APP_ID / CIRCLE_FEISHU_APP_SECRET（应用凭据，见 docs/usage.md）",
         );
       }
-      return new FeishuAdapter({ appId, appSecret, verificationToken, encryptKey, port, eventPath, botOpenId, baseUrl });
+      return new FeishuAdapter({ mode, appId, appSecret, verificationToken, encryptKey, port, eventPath, botOpenId, baseUrl });
     }
     case "wechat":
       // 旧方案：wechaty 逆向协议（不推荐，见 docs/usage.md）

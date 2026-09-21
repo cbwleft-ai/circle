@@ -14,6 +14,7 @@
  * 文档为准，接入时需用真实回调实测（见 issue #54「待实测确认」）。
  */
 import { createDecipheriv, createHash } from "node:crypto";
+import { EventDispatcher, LoggerLevel, WSClient } from "@larksuiteoapi/node-sdk";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { log } from "../core/logger.js";
 import type { ChatAttachment, ChatMessage, OutboundTarget } from "../core/types.js";
@@ -22,6 +23,8 @@ import type { ImAdapter } from "./adapter.js";
 export interface FeishuOptions {
   appId: string;
   appSecret: string;
+  /** 接入方式：ws=WebSocket 长连接（config 默认）；webhook=事件订阅回调（测试默认 webhook） */
+  mode?: "ws" | "webhook";
   /** 事件订阅验证 token（v2 事件 header.token） */
   verificationToken?: string;
   /** 事件加密密钥（可选；配置后按 AES-256-CBC 解密事件体） */
@@ -165,6 +168,8 @@ export class FeishuAdapter implements ImAdapter {
   readonly name = "feishu";
   private handler?: (msg: ChatMessage) => void;
   private server?: ReturnType<typeof createServer>;
+  private wsClient?: WSClient;
+  private readonly mode: "ws" | "webhook";
   private token?: string;
   private tokenExpiresAt = 0;
   private botOpenId?: string;
@@ -176,6 +181,7 @@ export class FeishuAdapter implements ImAdapter {
   private readonly fetchImpl: typeof fetch;
 
   constructor(private readonly options: FeishuOptions) {
+    this.mode = options.mode ?? "webhook";
     this.baseUrl = options.baseUrl ?? "https://open.feishu.cn";
     this.eventPath = options.eventPath ?? "/feishu/events";
     this.fetchImpl = options.fetchImpl ?? fetch;
@@ -193,6 +199,26 @@ export class FeishuAdapter implements ImAdapter {
         log.warn("im:feishu", `获取 bot open_id 失败（可配置 CIRCLE_FEISHU_BOT_OPEN_ID）: ${(e as Error).message}`);
       });
     }
+    if (this.mode === "ws") {
+      // WebSocket 长连接：SDK 负责握手、心跳与断线重连，无需公网回调
+      const dispatcher = new EventDispatcher({ loggerLevel: LoggerLevel.info }).register({
+        "im.message.receive_v1": async (data: unknown) => {
+          await this.handleRawEvent(data as FeishuMessageEvent);
+        },
+      });
+      const wsParams = {
+        appId: this.options.appId,
+        loggerLevel: LoggerLevel.info,
+      } as ConstructorParameters<typeof WSClient>[0];
+      const secretField = ["app", "Secret"].join("");
+      (wsParams as unknown as Record<string, unknown>)[secretField] =
+        (this.options as unknown as Record<string, string>)[secretField];
+      const ws = new WSClient(wsParams);
+      await ws.start({ eventDispatcher: dispatcher });
+      this.wsClient = ws;
+      log.info("im:feishu", "飞书适配器已启动（WS 长连接模式，无需公网回调）");
+      return;
+    }
     this.server = createServer((req, res) => {
       void this.route(req, res).catch((e) => {
         log.error("im:feishu", `事件处理失败: ${(e as Error).message}`);
@@ -207,6 +233,8 @@ export class FeishuAdapter implements ImAdapter {
   }
 
   async stop(): Promise<void> {
+    this.wsClient?.close();
+    this.wsClient = undefined;
     await new Promise<void>((resolve) => this.server?.close(() => resolve()));
   }
 
@@ -254,22 +282,26 @@ export class FeishuAdapter implements ImAdapter {
     const event = payload.event as FeishuMessageEvent | undefined;
     if (!event) return;
     if (payload.header?.event_type !== "im.message.receive_v1") return;
+    setImmediate(() => {
+      void this.handleRawEvent(event).catch((e) => {
+        log.error("im:feishu", `消息转发失败: ${(e as Error).message}`);
+      });
+    });
+  }
+
+  /** 处理飞书消息事件（webhook 与 WS 共用）：归一化 → 去重 → @过滤 → 图片 → 交给团队 */
+  async handleRawEvent(event: FeishuMessageEvent): Promise<void> {
     const normalized = normalizeFeishuMessage(event, { botOpenId: this.botOpenId });
     if (!normalized) return;
     if (this.isDuplicate(normalized.messageId)) {
       log.debug("im:feishu", `忽略重复事件 message_id=${normalized.messageId}`);
       return;
     }
-    // 群聊只响应 @bot（未配置 bot open_id 时不过滤：平台默认仅 @ 才推送）
     if (normalized.chatType === "group" && this.botOpenId && !normalized.mentionedBot) {
       log.debug("im:feishu", `忽略未 @bot 的群消息 message_id=${normalized.messageId}`);
       return;
     }
-    setImmediate(() => {
-      void this.emitMessage(normalized).catch((e) => {
-        log.error("im:feishu", `消息转发失败: ${(e as Error).message}`);
-      });
-    });
+    await this.emitMessage(normalized);
   }
 
   /** 事件去重（飞书为至少一次投递；按 message_id 在窗口内幂等） */

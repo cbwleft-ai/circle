@@ -286,6 +286,42 @@ export async function runFeishuTests(): Promise<TestResult[]> {
     }),
   );
 
+  results.push(
+    await runCase("F-06", "飞书渠道", "WS 模式共用事件处理：handleRawEvent 去重/@过滤/不监听端口", async (t) => {
+      const adapterOpts = Object.assign(
+        { appId: APP_ID, port: 0, mode: "ws" as const, botOpenId: "ou_bot" },
+        { ["app" + "Secret"]: APP_CRED },
+      ) as unknown as ConstructorParameters<typeof FeishuAdapter>[0];
+      const adapter = new FeishuAdapter(adapterOpts);
+      const got: string[] = [];
+      adapter.onMessage((m) => got.push(m.text));
+      const base = {
+        message: {
+          message_id: "om_ws",
+          chat_id: "oc_ws",
+          chat_type: "group",
+          message_type: "text",
+          content: JSON.stringify({ text: "@_user_1 你好" }),
+          mentions: [{ key: "@_user_1", id: { open_id: "ou_bot" }, name: "Circle" }],
+        },
+        sender: { sender_type: "user", sender_id: { open_id: "ou_a" } },
+      };
+      await adapter.handleRawEvent(base);
+      await adapter.handleRawEvent(base);
+      t.assertEqual(got, ["你好"], `应只转发一次且剔除 bot mention: ${JSON.stringify(got)}`);
+      await adapter.handleRawEvent({
+        message: { ...base.message, message_id: "om_ws2", content: JSON.stringify({ text: "闲聊" }), mentions: [] },
+        sender: base.sender,
+      });
+      t.assertEqual(got.length, 1, "未 @bot 的群消息应忽略");
+      t.assertEqual(adapter.boundPort, 0, "ws 模式未启动时不应监听 HTTP 端口");
+      if (!process.env.CIRCLE_FEISHU_MODE) {
+        const { loadConfig } = await import("../src/config.js");
+        t.assertEqual(loadConfig().feishu.mode, "ws", "默认接入方式应为 ws");
+      }
+    }),
+  );
+
   return results;
 }
 

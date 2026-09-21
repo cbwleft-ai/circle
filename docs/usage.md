@@ -221,8 +221,12 @@ npm start
 2. 申请权限：读取/发送消息与下载图片（如 `im:message`、`im:resource`，以开放平台为准）；
    全量接收群消息（`im:message.group_msg`）为敏感权限，首版**仅响应 @bot 的消息**：
    未配置 `CIRCLE_FEISHU_BOT_OPEN_ID` 时由平台默认只推送 @ 消息；开启全量后适配器会按 @ 过滤；
-3. 事件订阅选择「将事件发送至开发者服务器」，地址填 `http://<host>:<CIRCLE_FEISHU_PORT><CIRCLE_FEISHU_EVENT_PATH>`，
-   需要公网可达或反向代理；如启用了加密，设置 `CIRCLE_FEISHU_ENCRYPT_KEY`；
+3. 接入方式由 `CIRCLE_FEISHU_MODE` 决定：
+   - `ws`（默认，推荐）：WebSocket 长连接，**无需公网入口/反向代理**，也无需 Verification Token 与 Encrypt Key；
+     在开放平台「事件与回调」中选择「长连接」即可（目前仅自建应用支持）；
+   - `webhook`：事件订阅选择「将事件发送至开发者服务器」，地址填
+     `http://<host>:<CIRCLE_FEISHU_PORT><CIRCLE_FEISHU_EVENT_PATH>`，需要公网可达或反向代理；
+     如启用了加密，设置 `CIRCLE_FEISHU_ENCRYPT_KEY` 与 `CIRCLE_FEISHU_VERIFICATION_TOKEN`；
 4. 启动：
 
 ```bash
@@ -274,6 +278,7 @@ npm start
 | `CIRCLE_FEISHU_EVENT_PATH` | `/feishu/events` | 飞书 webhook 事件路径 |
 | `CIRCLE_FEISHU_BOT_OPEN_ID` | - | bot 自身 open_id（用于 @ 过滤与剔除；留空启动时自动获取） |
 | `CIRCLE_FEISHU_BASE_URL` | `https://open.feishu.cn` | 飞书 API 地址（私有化/测试可覆盖） |
+| `CIRCLE_FEISHU_MODE` | `ws` | 接入方式：`ws`=WebSocket 长连接（免公网入口）；`webhook`=事件订阅回调 |
 | `CIRCLE_WORKERS` | - | Worker 配置 JSON 数组（见下） |
 | `WECHAT_PUPPET` / `WECHAT_PUPPET_TOKEN` / `WECHAT_ALLOW_CONTACTS` | - | 微信适配器配置 |
 | `CIRCLE_LOG_LEVEL` | `info` | 日志级别 debug/info/warn/error |
