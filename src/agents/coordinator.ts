@@ -158,6 +158,20 @@ ${workers || "- （暂无 Worker）"}
 - 结果汇报包含任务编号、产出物位置、关键结果。`;
   }
 
+  /**
+   * Worker 名称参数：约束为实际可用 Worker 的枚举。
+   * 实测多个模型会编造不存在的 Worker 名（general/shell/worker-1 等），
+   * 导致派发返回「Worker 不存在」并多耗一轮 LLM；枚举可从结构上杜绝。
+   */
+  private workerSchema(description = "Worker 名称（必须是可用 Worker 之一）") {
+    const names = this.gateway.listWorkers().map((w) => w.name);
+    if (names.length === 0) return Type.String({ description });
+    return Type.Union(
+      names.map((name) => Type.Literal(name)),
+      { description },
+    );
+  }
+
   /** 自定义工具：Coordinator 与团队交互的唯一通道 */
   private buildTools(conversationKey: string) {
     const g = this.gateway;
@@ -169,7 +183,7 @@ ${workers || "- （暂无 Worker）"}
           "将具体执行任务派发给指定 Worker。长程任务（预计 >10 秒）请设置 long=true。执行结果由系统在完成后异步通知。",
         promptSnippet: "派发执行任务给 Worker",
         parameters: Type.Object({
-          worker: Type.String({ description: "Worker 名称" }),
+          worker: this.workerSchema(),
           title: Type.String({ description: "任务标题（一句话）" }),
           description: Type.String({ description: "给 Worker 的详细执行指令" }),
           long: Type.Optional(Type.Boolean({ description: "是否为长程任务（预计超过 10 秒）" })),
@@ -205,7 +219,7 @@ ${workers || "- （暂无 Worker）"}
             }),
           ),
           description: Type.String({ description: "触发时派发给 Worker 的执行指令" }),
-          worker: Type.String({ description: "执行该任务的 Worker 名称" }),
+          worker: this.workerSchema("执行该任务的 Worker 名称（必须是可用 Worker 之一）"),
         }),
         execute: async (_id, params) => {
           try {
@@ -247,7 +261,7 @@ ${workers || "- （暂无 Worker）"}
             Type.String({ description: "一次性触发时刻（本地时间 YYYY-MM-DD HH:mm），与 cron 二选一" }),
           ),
           description: Type.Optional(Type.String()),
-          worker: Type.Optional(Type.String()),
+          worker: Type.Optional(this.workerSchema("执行该任务的 Worker 名称（必须是可用 Worker 之一）")),
           enabled: Type.Optional(Type.Boolean()),
         }),
         execute: async (_id, params) => {
