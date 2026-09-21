@@ -29,7 +29,7 @@ import type { ScheduledTask } from "../core/types.js";
 import type { TeamGateway } from "../team/gateway.js";
 
 export class CoordinatorAgent {
-  /** 按会话（chatId）隔离的内存会话；停止时统一释放（非持久化） */
+  /** 按会话（conversationKey）隔离的内存会话；停止时统一释放（非持久化） */
   private readonly sessions = new Map<string, AgentSession>();
   private readonly gateway: TeamGateway;
 
@@ -42,7 +42,7 @@ export class CoordinatorAgent {
   }
 
   async start(): Promise<void> {
-    // 只校验模型可用；会话按 chatId 惰性创建（见 sessionFor）
+    // 只校验模型可用；会话按 conversationKey 惰性创建（见 sessionFor）
     const model = this.coordinatorModel();
     log.info("coordinator", `Coordinator 就绪（模型 ${model.id}，按会话隔离）`);
   }
@@ -62,11 +62,11 @@ export class CoordinatorAgent {
 
   /**
    * 获取（或惰性创建）指定会话的 Coordinator 会话。
-   * 工具通过闭包绑定 chatId（不接受 LLM 传入的会话 id）；
-   * 同一 chatId 的并发由 AgentTeam 的全局队列串行化。
+   * 工具通过闭包绑定 conversationKey（不接受 LLM 传入的会话 id）；
+   * 同一 conversationKey 的并发由 AgentTeam 的全局队列串行化。
    */
-  private async sessionFor(chatId: string): Promise<AgentSession> {
-    const existing = this.sessions.get(chatId);
+  private async sessionFor(conversationKey: string): Promise<AgentSession> {
+    const existing = this.sessions.get(conversationKey);
     if (existing) return existing;
 
     const loader = new DefaultResourceLoader({
@@ -85,13 +85,13 @@ export class CoordinatorAgent {
       thinkingLevel: this.config.coordinatorThinkingLevel,
       // 关键安全设计：不启用任何内置执行工具，仅保留自定义工具
       noTools: "builtin",
-      customTools: this.buildTools(chatId),
+      customTools: this.buildTools(conversationKey),
       resourceLoader: loader,
       sessionManager: SessionManagerShim.inMemory(),
       settingsManager: SessionManagerShim.inMemorySettings(),
     });
-    this.sessions.set(chatId, session);
-    log.info("coordinator", `为会话 ${chatId} 创建 Coordinator 会话（当前 ${this.sessions.size} 个）`);
+    this.sessions.set(conversationKey, session);
+    log.info("coordinator", `为会话 ${conversationKey} 创建 Coordinator 会话（当前 ${this.sessions.size} 个）`);
     return session;
   }
 
@@ -159,7 +159,7 @@ ${workers || "- （暂无 Worker）"}
   }
 
   /** 自定义工具：Coordinator 与团队交互的唯一通道 */
-  private buildTools(chatId: string) {
+  private buildTools(conversationKey: string) {
     const g = this.gateway;
     return [
       defineTool({
@@ -176,7 +176,7 @@ ${workers || "- （暂无 Worker）"}
         }),
         execute: async (_id, params) => {
           const res = await g.dispatch(
-            chatId,
+            conversationKey,
             params.worker,
             params.title,
             params.description,
@@ -210,7 +210,7 @@ ${workers || "- （暂无 Worker）"}
         execute: async (_id, params) => {
           try {
             const s = g.createSchedule(
-              chatId,
+              conversationKey,
               params.name,
               { cron: params.cron, at: params.at },
               params.description,
@@ -259,7 +259,7 @@ ${workers || "- （暂无 Worker）"}
             if (params.description !== undefined) patch.description = params.description;
             if (params.worker !== undefined) patch.workerName = params.worker;
             if (params.enabled !== undefined) patch.enabled = params.enabled;
-            const s = g.updateSchedule(chatId, params.id, patch);
+            const s = g.updateSchedule(conversationKey, params.id, patch);
             if (!s) return { content: [{ type: "text", text: `未找到定时任务 ${params.id}` }], details: {} };
             const when = s.kind === "once" ? `触发时间 ${s.runAt}` : `cron "${s.cron}"`;
             return {
@@ -285,7 +285,7 @@ ${workers || "- （暂无 Worker）"}
         }),
         execute: async (_id, params) => {
           try {
-            const ok = g.deleteSchedule(chatId, params.id);
+            const ok = g.deleteSchedule(conversationKey, params.id);
             return {
               content: [
                 {
@@ -310,7 +310,7 @@ ${workers || "- （暂无 Worker）"}
           ),
         }),
         execute: async (_id, params) => {
-          const text = g.listTasks(chatId, params.status as never);
+          const text = g.listTasks(conversationKey, params.status as never);
           return { content: [{ type: "text", text }], details: {} };
         },
       }),
@@ -320,7 +320,7 @@ ${workers || "- （暂无 Worker）"}
         description: "查询全部定时任务。",
         parameters: Type.Object({}),
         execute: async () => {
-          const text = g.listSchedules(chatId);
+          const text = g.listSchedules(conversationKey);
           return { content: [{ type: "text", text }], details: {} };
         },
       }),
@@ -347,7 +347,7 @@ ${workers || "- （暂无 Worker）"}
           taskId: Type.String({ description: "任务编号，如 T-20250813-0001" }),
         }),
         execute: async (_id, params) => {
-          const text = g.getTaskResult(chatId, params.taskId);
+          const text = g.getTaskResult(conversationKey, params.taskId);
           if (!text) {
             return {
               content: [{ type: "text", text: `任务 ${params.taskId} 不存在或暂无结果。` }],
@@ -367,7 +367,7 @@ ${workers || "- （暂无 Worker）"}
           taskId: Type.String({ description: "任务编号，如 T-20250813-0001" }),
         }),
         execute: async (_id, params) => {
-          const text = g.listArtifacts(chatId, params.taskId);
+          const text = g.listArtifacts(conversationKey, params.taskId);
           return { content: [{ type: "text", text }], details: {} };
         },
       }),
@@ -382,7 +382,7 @@ ${workers || "- （暂无 Worker）"}
           path: Type.String({ description: "产出物目录内的相对文件路径（来自 list_artifacts）" }),
         }),
         execute: async (_id, params) => {
-          const text = g.readArtifact(chatId, params.taskId, params.path);
+          const text = g.readArtifact(conversationKey, params.taskId, params.path);
           return { content: [{ type: "text", text }], details: {} };
         },
       }),
@@ -400,7 +400,7 @@ ${workers || "- （暂无 Worker）"}
           ),
         }),
         execute: async (_id, params) => {
-          const res = await g.sendArtifact(chatId, params.taskId, params.path, params.caption);
+          const res = await g.sendArtifact(conversationKey, params.taskId, params.path, params.caption);
           return { content: [{ type: "text", text: res.message }], details: {} };
         },
       }),
@@ -408,13 +408,13 @@ ${workers || "- （暂无 Worker）"}
   }
 
   /** 让指定会话的 Coordinator 处理一轮输入，返回其完整文本回复 */
-  async respond(chatId: string, input: string): Promise<string> {
+  async respond(conversationKey: string, input: string): Promise<string> {
     let session: AgentSession;
     try {
-      session = await this.sessionFor(chatId);
+      session = await this.sessionFor(conversationKey);
     } catch (e) {
       const err = (e as Error).message;
-      log.warn("coordinator", `[${chatId}] 会话创建失败: ${err}`);
+      log.warn("coordinator", `[${conversationKey}] 会话创建失败: ${err}`);
       return `（Coordinator 处理异常：${err}）`;
     }
     const chunks: string[] = [];
@@ -427,7 +427,7 @@ ${workers || "- （暂无 Worker）"}
       await session.prompt(`${systemTimeBlock()}\n${input}`);
     } catch (e) {
       const err = (e as Error).message;
-      log.warn("coordinator", `[${chatId}] 本轮回复异常: ${err}`);
+      log.warn("coordinator", `[${conversationKey}] 本轮回复异常: ${err}`);
       unsubscribe();
       return `（Coordinator 处理异常：${err}）`;
     }
@@ -436,8 +436,8 @@ ${workers || "- （暂无 Worker）"}
   }
 
   async dispose(): Promise<void> {
-    for (const chatId of this.sessions.keys()) {
-      log.info("coordinator", `释放 Coordinator 会话 ${chatId}`);
+    for (const conversationKey of this.sessions.keys()) {
+      log.info("coordinator", `释放 Coordinator 会话 ${conversationKey}`);
     }
     for (const session of this.sessions.values()) session.dispose();
     this.sessions.clear();

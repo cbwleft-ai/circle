@@ -35,6 +35,10 @@ export function mergeMessages(messages: ChatMessage[]): ChatMessage {
   const attachments = messages.flatMap((m) => m.attachments ?? []);
   return {
     chatId: first.chatId,
+    chatType: first.chatType,
+    senderId: first.senderId,
+    senderName: first.senderName,
+    threadKey: first.threadKey,
     text,
     attachments: attachments.length > 0 ? attachments : undefined,
   };
@@ -68,6 +72,11 @@ export class MessageMerger {
     private readonly windowMs: number,
     /** 一批消息合并后的处理回调（每批只调用一次） */
     private readonly process: (msg: ChatMessage) => Promise<void>,
+    /**
+     * 批次归属键（默认按 chatId；AgentTeam 传入 (conversationKey, senderId)，
+     * 群聊内避免把不同成员的消息合并为一批）。
+     */
+    private readonly keyOf: (msg: ChatMessage) => string = (msg) => msg.chatId,
   ) {}
 
   /** 进入一条消息，返回该消息所在批次处理完成的 Promise */
@@ -76,17 +85,17 @@ export class MessageMerger {
       // 合并关闭：立即逐条处理
       return this.process(msg);
     }
-    const chatId = msg.chatId;
+    const key = this.keyOf(msg);
     const hasAttachments = (msg.attachments ?? []).length > 0;
-    const hasPendingBatch = this.batches.has(chatId);
+    const hasPendingBatch = this.batches.has(key);
     // 合并窗口只由附件消息启动；纯文本消息无待合并批次时立即处理（零延迟）
     if (!hasAttachments && !hasPendingBatch) {
       return this.process(msg);
     }
-    let batch = this.batches.get(chatId);
+    let batch = this.batches.get(key);
     if (!batch) {
-      batch = { chatId, messages: [], settles: [] };
-      this.batches.set(chatId, batch);
+      batch = { chatId: msg.chatId, messages: [], settles: [] };
+      this.batches.set(key, batch);
     }
     batch.messages.push(msg);
     const settled = new Promise<void>((resolve, reject) => {
@@ -95,16 +104,16 @@ export class MessageMerger {
     // 新消息到达 → 重置窗口（debounce），窗口到期后统一处理
     if (batch.timer) clearTimeout(batch.timer);
     batch.timer = setTimeout(() => {
-      void this.flush(chatId);
+      void this.flush(key);
     }, this.windowMs);
     return settled;
   }
 
-  /** 立即处理指定会话的待合并批次（幂等：无批次时直接返回） */
-  async flush(chatId: string): Promise<void> {
-    const batch = this.batches.get(chatId);
+  /** 立即处理指定键的待合并批次（幂等：无批次时直接返回） */
+  async flush(key: string): Promise<void> {
+    const batch = this.batches.get(key);
     if (!batch) return;
-    this.batches.delete(chatId);
+    this.batches.delete(key);
     if (batch.timer) clearTimeout(batch.timer);
     const merged = mergeMessages(batch.messages);
     try {

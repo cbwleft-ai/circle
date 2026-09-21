@@ -48,8 +48,8 @@ export interface AppConfig {
   coordinatorThinkingLevel: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
   /** Worker 思考级别 */
   workerThinkingLevel: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
-  /** IM 适配器: console | http | wechat | weixin */
-  imAdapter: "console" | "http" | "wechat" | "weixin";
+  /** IM 适配器: console | http | wechat | weixin | feishu */
+  imAdapter: "console" | "http" | "wechat" | "weixin" | "feishu";
   /** HTTP 适配器端口 */
   httpPort: number;
   /** 微信机器人配置 */
@@ -58,6 +58,23 @@ export interface AppConfig {
     puppetToken?: string;
     /** 接收指令的联系人备注名（留空则接受所有人） */
     allowContacts: string[];
+  };
+  /** 飞书（Feishu/Lark）通道配置（issue #54） */
+  feishu: {
+    appId?: string;
+    appSecret?: string;
+    /** 事件订阅验证 token（webhook 模式） */
+    verificationToken?: string;
+    /** 事件加密密钥（可选；配置后按 AES-256-CBC 解密事件体） */
+    encryptKey?: string;
+    /** webhook 监听端口（默认 8788） */
+    port: number;
+    /** webhook 事件路径（默认 /feishu/events） */
+    eventPath: string;
+    /** bot 自身 open_id（可选；留空则启动时尝试自动获取，用于剔除 @bot 与 @ 过滤） */
+    botOpenId?: string;
+    /** API base URL（默认 https://open.feishu.cn） */
+    baseUrl?: string;
   };
   /** 微信官方 iLink 通道配置 */
   weixin: {
@@ -121,6 +138,16 @@ export function loadConfig(): AppConfig {
         .split(",")
         .map((s) => s.trim())
         .filter(Boolean),
+    },
+    feishu: {
+      appId: env("CIRCLE_FEISHU_APP_ID"),
+      appSecret: env("CIRCLE_FEISHU_APP_SECRET"),
+      verificationToken: env("CIRCLE_FEISHU_VERIFICATION_TOKEN"),
+      encryptKey: env("CIRCLE_FEISHU_ENCRYPT_KEY"),
+      port: envInt("CIRCLE_FEISHU_PORT", 8788),
+      eventPath: env("CIRCLE_FEISHU_EVENT_PATH") ?? "/feishu/events",
+      botOpenId: env("CIRCLE_FEISHU_BOT_OPEN_ID"),
+      baseUrl: env("CIRCLE_FEISHU_BASE_URL"),
     },
     weixin: {
       botToken: env("CIRCLE_WEIXIN_BOT_TOKEN"),

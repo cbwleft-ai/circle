@@ -6,7 +6,7 @@
  * - GET  /ping                             存活检查（用于网关校验）
  */
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import type { ChatAttachment, ChatMessage } from "../core/types.js";
+import type { ChatAttachment, ChatMessage, OutboundTarget } from "../core/types.js";
 import { log } from "../core/logger.js";
 import type { ImAdapter } from "./adapter.js";
 
@@ -64,7 +64,7 @@ export class HttpAdapter implements ImAdapter {
     await new Promise<void>((resolve) => this.server?.close(() => resolve()));
   }
 
-  async send(chatId: string, text: string): Promise<void> {
+  async send(chatId: string, text: string, _target?: OutboundTarget): Promise<void> {
     // HTTP 通道的"下行"由接入方通过自身网关推送；
     // 这里把消息写入日志，并可选回调 http 下行 hook。
     log.info("im:http", `下行消息 → ${chatId}: ${text.slice(0, 200)}`);

@@ -9,7 +9,7 @@
  * 未安装 wechaty 时，start() 会给出明确指引而不会崩溃。
  */
 import { log } from "../core/logger.js";
-import type { ChatMessage } from "../core/types.js";
+import type { ChatMessage, OutboundTarget } from "../core/types.js";
 import type { ImAdapter } from "./adapter.js";
 
 export interface WechatAdapterOptions {
@@ -96,7 +96,7 @@ export class WechatAdapter implements ImAdapter {
     this.started = false;
   }
 
-  async send(chatId: string, text: string): Promise<void> {
+  async send(chatId: string, text: string, _target?: OutboundTarget): Promise<void> {
     if (!this.bot) return;
     try {
       if (chatId.startsWith("room:")) {
