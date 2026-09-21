@@ -1761,6 +1761,47 @@ export async function runUnitTests(): Promise<TestResult[]> {
     }),
   );
 
+  // ---------- 会话分片合并（issue #54） ----------
+  results.push(
+    await runCase("U-52", "消息合并", "MessageMerger keyOf：同会话不同发送者不合并；合并保留归因", async (t) => {
+      const { MessageMerger, mergeMessages } = await import("../src/core/message-merge.js");
+      const processed: string[] = [];
+      const merger = new MessageMerger(
+        40,
+        async (msg) => {
+          processed.push(`${msg.senderId}:${msg.text}`);
+        },
+        (m) => `${m.chatId}:${m.threadKey ?? ""}:${m.senderId}`,
+      );
+      await Promise.all([
+        merger.push({
+          chatId: "g",
+          chatType: "group",
+          senderId: "u1",
+          text: "",
+          attachments: [{ kind: "image", data: "A" }],
+        }),
+        merger.push({ chatId: "g", chatType: "group", senderId: "u2", text: "李四的消息" }),
+        merger.push({ chatId: "g", chatType: "group", senderId: "u1", text: "张三的描述" }),
+      ]);
+      t.assert(processed.length === 2, `不同发送者应分 2 批处理，实际 ${processed.length}`);
+      t.assert(processed.some((x) => x === "u1:张三的描述"), `张三批次应合并附件与描述：${processed.join(" | ")}`);
+      t.assert(processed.some((x) => x === "u2:李四的消息"), "李四的消息应独立处理");
+
+      const merged = mergeMessages([
+        { chatId: "g", chatType: "group", senderId: "u1", senderName: "张三", threadKey: "t1", text: "a" },
+        { chatId: "g", chatType: "group", senderId: "u1", senderName: "张三", threadKey: "t1", text: "b" },
+      ]);
+      t.assert(
+        merged.chatType === "group" &&
+          merged.senderId === "u1" &&
+          merged.senderName === "张三" &&
+          merged.threadKey === "t1",
+        "合并后应保留 chatType/senderId/senderName/threadKey",
+      );
+    }),
+  );
+
   // ---------- IM 测试适配器 ----------
   results.push(
     await runCase("U-17", "IM 适配器", "TestAdapter 注入与等待", async (t) => {

@@ -53,8 +53,10 @@ export interface Task {
   requestedBy: "user" | "scheduler";
   /** 若由定时任务触发，记录 schedule id */
   scheduleId?: string;
-  /** 发起对话的 chatId（用于异步结果汇报） */
+  /** 发起对话的 chatId（用于异步结果汇报与数据归属隔离） */
   requestChatId?: string;
+  /** 发起消息所在线程键（异步结果回流原话题，issue #54） */
+  requestThreadKey?: string;
   /** 用户附带的图片/文件（落盘路径），Worker 执行时作为图片输入传给模型（issue #3） */
   attachments?: TaskAttachment[];
   createdAt: number;
@@ -119,9 +121,23 @@ export interface WorkerConfig {
   modelId?: string;
 }
 
+/** 会话类型：dm=单聊；group=群聊（群内多成员共享会话，消息按 sender 归因） */
+export type ChatType = "dm" | "group";
+
 /** 对话消息（IM 层与团队层之间的统一结构） */
 export interface ChatMessage {
   chatId: string;
+  /** 会话类型；缺省视为 dm（兼容旧适配器） */
+  chatType?: ChatType;
+  /** 发送者稳定 id（归因用；缺省时下游以 chatId 兜底，见 issue #53） */
+  senderId?: string;
+  /** 发送者展示名（仅用于提示词归因，不落存储） */
+  senderName?: string;
+  /**
+   * 会话线程键（issue #54）：飞书话题/回复串的 root_id 或 thread_id；
+   * 缺省表示主会话（私聊或群根级）。conversationKey = chatId + threadKey。
+   */
+  threadKey?: string;
   text: string;
   /** 附带附件（图片/文件），base64 内容或本地路径，由 IM 适配器提供（issue #3） */
   attachments?: ChatAttachment[];
@@ -148,6 +164,15 @@ export interface TaskAttachment {
   /** 落盘后的绝对路径 */
   path: string;
   mimeType?: string;
+}
+
+/** 下行消息目标（话题/线程上下文，issue #54） */
+export interface OutboundTarget {
+  /**
+   * 线程键：飞书为话题根消息 id（用于 message.reply + reply_in_thread）。
+   * 适配器按平台语义使用；不支持话题的通道忽略。
+   */
+  threadKey?: string;
 }
 
 /** 下行文件消息载荷（附件） */
