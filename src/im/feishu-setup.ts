@@ -6,7 +6,7 @@
  */
 import { createInterface } from "node:readline/promises";
 import { Writable } from "node:stream";
-import { log } from "./logger.js";
+import { log } from "../core/logger.js";
 import { feishuAuthPath, saveFeishuAuth, verifyFeishuAuth, type FeishuAuth } from "./feishu-auth.js";
 
 /** 引导式配置所需的飞书配置片段（与 AppConfig["feishu"] 兼容） */

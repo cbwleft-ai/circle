@@ -4,7 +4,7 @@
  * 凭据默认存于 `~/.circle/secrets/feishu.json`（0600），**不写入仓库、也不进进程环境变量**：
  * 环境变量会被 Worker 子进程继承（`printenv` 即可读到），而密钥文件只有主动读取才暴露。
  *
- * 解析优先级（见 src/config.ts）：环境变量 > 密钥文件 > 引导式配置（src/core/feishu-setup.ts）。
+ * 解析优先级（见 src/config.ts）：环境变量 > 密钥文件 > 引导式配置（src/im/feishu-setup.ts）。
  */
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";

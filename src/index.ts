@@ -9,7 +9,7 @@
  */
 import { join } from "node:path";
 import { defaultWorkers, loadConfig } from "./config.js";
-import { ensureFeishuCredentials } from "./core/feishu-setup.js";
+import { ensureFeishuCredentials } from "./im/feishu-setup.js";
 import { log, setLogFile } from "./core/logger.js";
 import { timezoneInfo } from "./core/time.js";
 import { ConsoleAdapter } from "./im/console.js";

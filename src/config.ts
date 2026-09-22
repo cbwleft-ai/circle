@@ -1,7 +1,7 @@
 import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
-import { loadFeishuAuth } from "./core/feishu-auth.js";
+import { loadFeishuAuth } from "./im/feishu-auth.js";
 
 export interface AppConfig {
   /** 数据目录（任务存储、定时任务存储、工作空间） */

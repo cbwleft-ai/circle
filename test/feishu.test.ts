@@ -14,7 +14,7 @@ import {
 } from "../src/im/feishu.js";
 import { conversationKeyOf } from "../src/core/conversation.js";
 import { loadConfig } from "../src/config.js";
-import { feishuAuthPath, loadFeishuAuth, saveFeishuAuth, secretsDir } from "../src/core/feishu-auth.js";
+import { feishuAuthPath, loadFeishuAuth, saveFeishuAuth, secretsDir } from "../src/im/feishu-auth.js";
 
 const APP_ID = "cli_demo";
 const APP_CRED = ["s", "e", "c"].join("");
@@ -429,7 +429,7 @@ export async function runFeishuTests(): Promise<TestResult[]> {
       const desc = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
       Object.defineProperty(process.stdin, "isTTY", { value: false, configurable: true });
       try {
-        const { ensureFeishuCredentials } = await import("../src/core/feishu-setup.js");
+        const { ensureFeishuCredentials } = await import("../src/im/feishu-setup.js");
         try {
           await ensureFeishuCredentials(target);
           t.assert(false, "非 TTY 且无凭据时应抛错（不应挂起等输入）");

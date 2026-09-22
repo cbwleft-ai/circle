@@ -261,7 +261,7 @@ npm start
 
    凭据文件默认位于 `~/.circle/secrets/feishu.json`（目录 0700、文件 0600），
    可用 `CIRCLE_SECRETS_DIR` 改到别处；`webhook` 模式的 Verification Token / Encrypt Key
-   也会一并保存在该文件中（见 `src/core/feishu-auth.ts`）。
+   也会一并保存在该文件中（见 `src/im/feishu-auth.ts`）。
 
 ### 会话与话题
 

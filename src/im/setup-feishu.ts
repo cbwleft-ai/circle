@@ -4,8 +4,8 @@
  * 用于首次配置、更换 App Secret 或轮换凭据（会覆盖已有配置）。
  * 与首次启动时的引导式配置（src/index.ts）共用同一套流程。
  */
-import { loadConfig } from "./config.js";
-import { ensureFeishuCredentials } from "./core/feishu-setup.js";
+import { loadConfig } from "../config.js";
+import { ensureFeishuCredentials } from "./feishu-setup.js";
 
 async function main(): Promise<void> {
   const config = loadConfig();
