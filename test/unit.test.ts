@@ -1290,19 +1290,19 @@ export async function runUnitTests(): Promise<TestResult[]> {
       try {
         // 未配置 → 全部回退到全局默认
         const d = loadConfig();
-        t.assert(d.coordinatorModelProvider === "deepseek" && d.coordinatorModelId === "deepseek-v4-flash", "默认应回退 deepseek-v4-flash");
-        t.assert(d.workerModelProvider === "deepseek" && d.workerModelId === "deepseek-v4-flash", "Worker 默认应同全局");
+        t.assert(d.coordinatorModelProvider === "deepseek" && d.coordinatorModelId === "deepseek-flash", "默认应回退 deepseek-flash");
+        t.assert(d.workerModelProvider === "deepseek" && d.workerModelId === "deepseek-flash", "Worker 默认应同全局");
         // 仅配置全局 → 跟随全局
         process.env.CIRCLE_MODEL_PROVIDER = "deepseek";
         process.env.CIRCLE_MODEL_ID = "deepseek-v4-pro";
         const g = loadConfig();
         t.assert(g.coordinatorModelId === "deepseek-v4-pro" && g.workerModelId === "deepseek-v4-pro", "应跟随全局模型");
         // Coordinator 与 Worker 分别覆盖
-        process.env.CIRCLE_COORDINATOR_MODEL_ID = "deepseek-v4-flash";
-        process.env.CIRCLE_WORKER_MODEL_ID = "deepseek-v4-flash-vision-exp";
+        process.env.CIRCLE_COORDINATOR_MODEL_ID = "deepseek-flash";
+        process.env.CIRCLE_WORKER_MODEL_ID = "deepseek-v4-pro";
         const s = loadConfig();
-        t.assert(s.coordinatorModelId === "deepseek-v4-flash", `Coordinator 应独立配置，实际 ${s.coordinatorModelId}`);
-        t.assert(s.workerModelId === "deepseek-v4-flash-vision-exp", `Worker 应独立配置，实际 ${s.workerModelId}`);
+        t.assert(s.coordinatorModelId === "deepseek-flash", `Coordinator 应独立配置，实际 ${s.coordinatorModelId}`);
+        t.assert(s.workerModelId === "deepseek-v4-pro", `Worker 应独立配置，实际 ${s.workerModelId}`);
         t.assert(s.coordinatorModelId !== s.workerModelId, "Coordinator 与 Worker 模型应可不同");
         t.log(`Coordinator=${s.coordinatorModelProvider}/${s.coordinatorModelId}，Worker=${s.workerModelProvider}/${s.workerModelId}`);
       } finally {

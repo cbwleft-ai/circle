@@ -34,7 +34,7 @@
 
 ## 技术选型
 
-- **Agent 框架**：Pi Agent SDK（`@earendil-works/pi-coding-agent`）+ **DeepSeek V4 Flash**（OpenAI 兼容 API，已内置 provider 配置）
+- **Agent 框架**：Pi Agent SDK（`@earendil-works/pi-coding-agent`）+ **DeepSeek V4.1 Flash**（`deepseek-flash`，OpenAI 兼容 API，原生支持图片输入）
 - **IM 框架**：微信 AI 机器人（官方 iLink 通道，扫码登录；另备 wechaty 旧方案）；内置 控制台 / HTTP 适配器便于演示与集成
 - **运行时**：Node.js ≥ 20，TypeScript（ESM）
 
@@ -60,6 +60,8 @@ npm start
 更多接入方式（HTTP / 微信）与配置项见 [docs/usage.md](docs/usage.md)。
 
 ## 多模态（图片输入，issue #3）
+
+默认模型 `deepseek-flash`（DeepSeek V4.1 Flash）原生支持图片输入，无需额外注册视觉模型。
 
 用户可通过 IM（微信/HTTP）发送图片，图片落盘到 `{dataDir}/uploads/`，随任务派发给 Worker：
 
@@ -99,7 +101,7 @@ Coordinator：定时任务创建成功：S-XXX「提交材料提醒」，触发�
 默认两者共用 `CIRCLE_MODEL_PROVIDER` / `CIRCLE_MODEL_ID`；可分别覆盖（例如 Coordinator 用文本模型保持快速/低成本，Worker 用更强的执行模型）：
 
 ```bash
-export CIRCLE_COORDINATOR_MODEL_ID=deepseek-v4-flash          # Coordinator（对话/路由）
+export CIRCLE_COORDINATOR_MODEL_ID=deepseek-flash          # Coordinator（对话/路由）
 export CIRCLE_WORKER_MODEL_ID=deepseek-v4-pro                 # Worker（执行）
 ```
 

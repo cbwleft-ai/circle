@@ -97,7 +97,7 @@ export interface ImAdapter {
 ### 2.6 更换/新增模型
 
 模型通过 pi 的 provider 机制注册（`CIRCLE_AGENT_DIR/models.json` 或扩展注册）。
-本项目默认 DeepSeek V4 Flash（OpenAI 兼容），更换模型只需调整环境变量
+本项目默认 DeepSeek V4.1 Flash（`deepseek-flash`，OpenAI 兼容，原生支持图片输入），更换模型只需调整环境变量
 `CIRCLE_MODEL_PROVIDER` / `CIRCLE_MODEL_ID`（该模型需支持函数调用）。
 
 ## 3. 关键设计约定
