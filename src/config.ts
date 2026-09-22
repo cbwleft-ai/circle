@@ -1,6 +1,7 @@
 import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
+import { loadFeishuAuth } from "./core/feishu-auth.js";
 
 export interface AppConfig {
   /** 数据目录（任务存储、定时任务存储、工作空间） */
@@ -106,6 +107,9 @@ export function loadConfig(): AppConfig {
   // 默认数据目录：~/.circle/data（与 ~/.pi/agent 同级，辨识度高）；
   // 可用 CIRCLE_DATA_DIR 覆盖（历史部署曾用 /home/<user>/data 等位置）。
   const dataDir = env("CIRCLE_DATA_DIR") ?? resolve(homedir(), ".circle", "data");
+  // 飞书凭据：环境变量 > 密钥文件（~/.circle/secrets/feishu.json）> 引导式配置。
+  // 密钥文件优先于交互式配置；环境变量仅用于临时覆盖（会进入 Worker 子进程环境，不推荐）。
+  const feishuFile = loadFeishuAuth();
   mkdirSync(dataDir, { recursive: true });
   mkdirSync(resolve(dataDir, "workspaces"), { recursive: true });
   mkdirSync(resolve(dataDir, "sessions"), { recursive: true });
@@ -143,10 +147,10 @@ export function loadConfig(): AppConfig {
     },
     feishu: {
       mode: (env("CIRCLE_FEISHU_MODE") as "ws" | "webhook" | undefined) ?? "ws",
-      appId: env("CIRCLE_FEISHU_APP_ID"),
-      appSecret: env("CIRCLE_FEISHU_APP_SECRET"),
-      verificationToken: env("CIRCLE_FEISHU_VERIFICATION_TOKEN"),
-      encryptKey: env("CIRCLE_FEISHU_ENCRYPT_KEY"),
+      appId: env("CIRCLE_FEISHU_APP_ID") ?? feishuFile?.appId,
+      appSecret: env("CIRCLE_FEISHU_APP_SECRET") ?? feishuFile?.appSecret,
+      verificationToken: env("CIRCLE_FEISHU_VERIFICATION_TOKEN") ?? feishuFile?.verificationToken,
+      encryptKey: env("CIRCLE_FEISHU_ENCRYPT_KEY") ?? feishuFile?.encryptKey,
       port: envInt("CIRCLE_FEISHU_PORT", 8788),
       eventPath: env("CIRCLE_FEISHU_EVENT_PATH") ?? "/feishu/events",
       botOpenId: env("CIRCLE_FEISHU_BOT_OPEN_ID"),

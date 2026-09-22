@@ -9,6 +9,7 @@
  */
 import { join } from "node:path";
 import { defaultWorkers, loadConfig } from "./config.js";
+import { ensureFeishuCredentials } from "./core/feishu-setup.js";
 import { log, setLogFile } from "./core/logger.js";
 import { timezoneInfo } from "./core/time.js";
 import { ConsoleAdapter } from "./im/console.js";
@@ -35,6 +36,11 @@ async function main(): Promise<void> {
     );
   }
   log.info("bootstrap", `Circle 启动中（IM: ${config.imAdapter}, 模型: ${config.modelProvider}/${config.modelId}）`);
+
+  // 飞书渠道：凭据缺失时先走引导式配置（校验通过后写入 ~/.circle/secrets/feishu.json）
+  if (config.imAdapter === "feishu") {
+    await ensureFeishuCredentials(config.feishu);
+  }
 
   // 选择 IM 适配器
   const adapter = createAdapter(config.imAdapter, config);
@@ -70,7 +76,8 @@ function createAdapter(kind: ReturnType<typeof loadConfig>["imAdapter"], config:
       const { mode, appId, appSecret, verificationToken, encryptKey, port, eventPath, botOpenId, baseUrl } = config.feishu;
       if (!appId || !appSecret) {
         throw new Error(
-          "飞书适配器需要 CIRCLE_FEISHU_APP_ID / CIRCLE_FEISHU_APP_SECRET（应用凭据，见 docs/usage.md）",
+          "飞书适配器需要应用凭据：运行 `npm run setup:feishu` 引导式配置，或写入 " +
+            "~/.circle/secrets/feishu.json，或设置 CIRCLE_FEISHU_APP_ID / CIRCLE_FEISHU_APP_SECRET（见 docs/usage.md）",
         );
       }
       return new FeishuAdapter({ mode, appId, appSecret, verificationToken, encryptKey, port, eventPath, botOpenId, baseUrl });
