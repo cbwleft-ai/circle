@@ -227,15 +227,41 @@ npm start
    - `webhook`：事件订阅选择「将事件发送至开发者服务器」，地址填
      `http://<host>:<CIRCLE_FEISHU_PORT><CIRCLE_FEISHU_EVENT_PATH>`，需要公网可达或反向代理；
      如启用了加密，设置 `CIRCLE_FEISHU_ENCRYPT_KEY` 与 `CIRCLE_FEISHU_VERIFICATION_TOKEN`；
-4. 启动：
+4. 配置应用凭据（三选一，优先级：环境变量 > 凭据文件 > 引导式配置）：
 
-```bash
-export CIRCLE_IM_ADAPTER=feishu
-export CIRCLE_FEISHU_APP_ID=cli_xxx
-export CIRCLE_FEISHU_APP_SECRET=xxx
-export CIRCLE_FEISHU_VERIFICATION_TOKEN=xxx
-npm start
-```
+   - **引导式配置（推荐）**：凭据缺失时启动会提示输入 App ID / App Secret，
+     输入后立即调用飞书接口校验，**校验通过才写入密钥文件**，无需手工编辑任何文件：
+
+     ```bash
+     export CIRCLE_IM_ADAPTER=feishu
+     npm start
+     ```
+
+     更换或轮换凭据：`npm run setup:feishu`
+
+   - **写入密钥文件**（服务器等无交互终端场景）：
+
+     ```bash
+     mkdir -p ~/.circle/secrets && chmod 700 ~/.circle/secrets
+     cat > ~/.circle/secrets/feishu.json <<'EOF'
+     { "appId": "cli_xxx", "appSecret": "xxx" }
+     EOF
+     chmod 600 ~/.circle/secrets/feishu.json
+     ```
+
+   - **环境变量**（仅建议 CI / 临时调试）：环境变量会被 Worker 子进程继承
+     （子进程执行 `printenv` 即可读到），不适合长期存放飞书凭据：
+
+     ```bash
+     export CIRCLE_IM_ADAPTER=feishu
+     export CIRCLE_FEISHU_APP_ID=cli_xxx
+     export CIRCLE_FEISHU_APP_SECRET=xxx
+     npm start
+     ```
+
+   凭据文件默认位于 `~/.circle/secrets/feishu.json`（目录 0700、文件 0600），
+   可用 `CIRCLE_SECRETS_DIR` 改到别处；`webhook` 模式的 Verification Token / Encrypt Key
+   也会一并保存在该文件中（见 `src/im/feishu-auth.ts`）。
 
 ### 会话与话题
 
@@ -252,6 +278,7 @@ npm start
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `CIRCLE_DATA_DIR` | `~/.circle/data` | 数据目录（任务/定时任务/工作空间/微信账户/日志） |
+| `CIRCLE_SECRETS_DIR` | `~/.circle/secrets` | 密钥目录（飞书凭据 `feishu.json`，目录 0700 / 文件 0600） |
 | `CIRCLE_AGENT_DIR` | `~/.pi/agent` | pi 配置目录（模型/凭据） |
 | `CIRCLE_MODEL_PROVIDER` | `deepseek` | 模型 provider |
 | `CIRCLE_MODEL_ID` | `deepseek-v4-flash` | 模型 id |
@@ -271,7 +298,7 @@ npm start
 | `CIRCLE_WEIXIN_BOT_TOKEN` | - | 微信官方通道：直接指定 bot token（跳过扫码） |
 | `CIRCLE_WEIXIN_BASE_URL` | 官方地址 | 微信官方通道 API 地址 |
 | `CIRCLE_WEIXIN_BOT_TYPE` | `3` | 微信官方通道 bot 类型 |
-| `CIRCLE_FEISHU_APP_ID` / `CIRCLE_FEISHU_APP_SECRET` | - | 飞书自建应用凭据（事件订阅 + 消息 API） |
+| `CIRCLE_FEISHU_APP_ID` / `CIRCLE_FEISHU_APP_SECRET` | - | 飞书自建应用凭据；仅作临时覆盖，推荐 `npm run setup:feishu` 写入密钥文件 |
 | `CIRCLE_FEISHU_VERIFICATION_TOKEN` | - | 飞书事件订阅 Verification Token |
 | `CIRCLE_FEISHU_ENCRYPT_KEY` | - | 飞书事件 Encrypt Key（配置后按 AES-256-CBC 解密事件体） |
 | `CIRCLE_FEISHU_PORT` | `8788` | 飞书 webhook 监听端口 |

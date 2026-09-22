@@ -2,6 +2,9 @@
  * 飞书渠道消息处理单元测试（issue #54）——全部确定性，不依赖飞书网络。
  */
 import { createCipheriv, createHash } from "node:crypto";
+import { chmodSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { runCase, type TestResult } from "./helpers.js";
 import {
   FeishuAdapter,
@@ -10,9 +13,46 @@ import {
   stripMentions,
 } from "../src/im/feishu.js";
 import { conversationKeyOf } from "../src/core/conversation.js";
+import { loadConfig } from "../src/config.js";
+import { feishuAuthPath, loadFeishuAuth, saveFeishuAuth, secretsDir } from "../src/im/feishu-auth.js";
 
 const APP_ID = "cli_demo";
 const APP_CRED = ["s", "e", "c"].join("");
+
+/** 文件权限位（如 0o600） */
+const fileMode = (p: string): number => statSync(p).mode & 0o777;
+
+/** 在临时密钥目录下运行 fn，结束后恢复环境变量并清理 */
+async function withTempSecretsDir(fn: (dir: string) => Promise<void> | void): Promise<void> {
+  const dir = mkdtempSync(join(tmpdir(), "circle-feishu-auth-"));
+  const saved = process.env.CIRCLE_SECRETS_DIR;
+  process.env.CIRCLE_SECRETS_DIR = dir;
+  try {
+    await fn(dir);
+  } finally {
+    if (saved === undefined) delete process.env.CIRCLE_SECRETS_DIR;
+    else process.env.CIRCLE_SECRETS_DIR = saved;
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+/** 临时设置环境变量，结束后恢复 */
+async function withEnv(vars: Record<string, string | undefined>, fn: () => Promise<void> | void): Promise<void> {
+  const saved = new Map<string, string | undefined>();
+  for (const [k, v] of Object.entries(vars)) {
+    saved.set(k, process.env[k]);
+    if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  }
+  try {
+    await fn();
+  } finally {
+    for (const [k, v] of saved) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+}
 
 export async function runFeishuTests(): Promise<TestResult[]> {
   const results: TestResult[] = [];
@@ -318,6 +358,91 @@ export async function runFeishuTests(): Promise<TestResult[]> {
       if (!process.env.CIRCLE_FEISHU_MODE) {
         const { loadConfig } = await import("../src/config.js");
         t.assertEqual(loadConfig().feishu.mode, "ws", "默认接入方式应为 ws");
+      }
+    }),
+  );
+
+  results.push(
+    await runCase("F-07", "飞书渠道", "凭据文件：读写往返、目录 0700、文件 0600", async (t) => {
+      await withTempSecretsDir(async (dir) => {
+        t.assert(loadFeishuAuth() === undefined, "初始应无凭据（返回 undefined 而非抛错）");
+        t.assertEqual(secretsDir(), dir, "密钥目录应受 CIRCLE_SECRETS_DIR 控制");
+
+        const path = saveFeishuAuth({
+          appId: APP_ID,
+          appSecret: APP_CRED,
+          verificationToken: "vt",
+          encryptKey: "ek",
+        });
+        t.assertEqual(path, feishuAuthPath(), "凭据应写入密钥目录下的 feishu.json");
+        t.assertEqual(fileMode(path), 0o600, "凭据文件权限应为 600");
+        t.assertEqual(fileMode(dir), 0o700, "密钥目录权限应为 700");
+
+        const loaded = loadFeishuAuth();
+        t.assertEqual(loaded?.appId, APP_ID, "appId 应可读回");
+        t.assertEqual(loaded?.appSecret, APP_CRED, "appSecret 应可读回");
+        t.assertEqual(loaded?.encryptKey, "ek", "encryptKey 应可读回");
+
+        // 覆盖写入时 writeFileSync 的 mode 不生效，需靠显式 chmod 收紧历史宽权限文件
+        chmodSync(path, 0o644);
+        saveFeishuAuth({ appId: APP_ID, appSecret: APP_CRED });
+        t.assertEqual(fileMode(path), 0o600, "覆盖写入后权限应收紧为 600");
+        t.assert(loadFeishuAuth()?.verificationToken === undefined, "未提供的可选字段不应残留");
+      });
+    }),
+  );
+
+  results.push(
+    await runCase("F-08", "飞书渠道", "凭据解析优先级：环境变量 > 凭据文件", async (t) => {
+      await withTempSecretsDir(async () => {
+        await withEnv({ CIRCLE_FEISHU_APP_ID: undefined, CIRCLE_FEISHU_APP_SECRET: undefined }, () => {
+          saveFeishuAuth({ appId: "cli_from_file", appSecret: "secret_from_file" });
+          const fromFile = loadConfig();
+          t.assertEqual(fromFile.feishu.appId, "cli_from_file", "无环境变量时应回退到凭据文件");
+          t.assertEqual(fromFile.feishu.appSecret, "secret_from_file", "无环境变量时应回退到凭据文件");
+        });
+
+        await withEnv({ CIRCLE_FEISHU_APP_ID: "cli_from_env", CIRCLE_FEISHU_APP_SECRET: "secret_from_env" }, () => {
+          const fromEnv = loadConfig();
+          t.assertEqual(fromEnv.feishu.appId, "cli_from_env", "环境变量应优先于凭据文件");
+          t.assertEqual(fromEnv.feishu.appSecret, "secret_from_env", "环境变量应优先于凭据文件");
+        });
+      });
+    }),
+  );
+
+  results.push(
+    await runCase("F-09", "飞书渠道", "凭据文件损坏/字段不全时视为未配置", async (t) => {
+      await withTempSecretsDir(async () => {
+        writeFileSync(feishuAuthPath(), "{ 这不是合法 json", "utf-8");
+        t.assert(loadFeishuAuth() === undefined, "损坏文件应返回 undefined 而不是抛错");
+        writeFileSync(feishuAuthPath(), JSON.stringify({ appId: "cli_only" }), "utf-8");
+        t.assert(loadFeishuAuth() === undefined, "缺少 appSecret 应视为未配置");
+        t.assert(loadConfig().feishu.appId === undefined || loadConfig().feishu.appId !== "cli_only", "字段不全不应被当作已配置凭据");
+      });
+    }),
+  );
+
+  results.push(
+    await runCase("F-10", "飞书渠道", "引导式配置：非交互终端且无凭据时给出可操作的指引", async (t) => {
+      const target = { mode: "ws" as const };
+      const desc = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
+      Object.defineProperty(process.stdin, "isTTY", { value: false, configurable: true });
+      try {
+        const { ensureFeishuCredentials } = await import("../src/im/feishu-setup.js");
+        try {
+          await ensureFeishuCredentials(target);
+          t.assert(false, "非 TTY 且无凭据时应抛错（不应挂起等输入）");
+        } catch (e) {
+          const msg = (e as Error).message;
+          t.assert(msg.includes("feishu.json"), `应提示凭据文件路径：${msg}`);
+          t.assert(msg.includes("CIRCLE_FEISHU_APP_ID"), "应提示环境变量方式");
+        }
+        const changed = await ensureFeishuCredentials({ mode: "ws", appId: APP_ID, appSecret: APP_CRED });
+        t.assertEqual(changed, false, "已有凭据时应直接返回 false（不进入交互）");
+      } finally {
+        if (desc) Object.defineProperty(process.stdin, "isTTY", desc);
+        else delete (process.stdin as { isTTY?: boolean }).isTTY;
       }
     }),
   );

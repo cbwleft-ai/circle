@@ -10,6 +10,7 @@
   "scripts": {
     "start": "tsx src/index.ts",
     "dev": "tsx watch src/index.ts",
+    "setup:feishu": "tsx src/im/setup-feishu.ts",
     "build": "tsc -p tsconfig.json",
     "test": "tsx test/run.ts",
     "test:unit": "tsx test/unit.test.ts",
