@@ -52,7 +52,7 @@ async function main() {
   const extra = [
     "## 环境信息",
     "",
-    `- 模型：${process.env.CIRCLE_MODEL_PROVIDER ?? "deepseek"} / ${process.env.CIRCLE_MODEL_ID ?? "deepseek-v4-flash"}`,
+    `- 模型：${process.env.CIRCLE_MODEL_PROVIDER ?? "deepseek"} / ${process.env.CIRCLE_MODEL_ID ?? "deepseek-flash"}`,
     `- LLM 端到端用例：${llmEnabled ? "启用" : "跳过"}`,
     `- Node：${process.version}`,
     "",

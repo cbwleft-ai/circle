@@ -126,11 +126,11 @@ export function loadConfig(): AppConfig {
     defaultChatId: env("CIRCLE_DEFAULT_CHAT_ID") ?? "console",
     agentDir: env("CIRCLE_AGENT_DIR") ?? process.env.HOME + "/.pi/agent",
     modelProvider: env("CIRCLE_MODEL_PROVIDER") ?? "deepseek",
-    modelId: env("CIRCLE_MODEL_ID") ?? "deepseek-v4-flash",
+    modelId: env("CIRCLE_MODEL_ID") ?? "deepseek-flash",
     coordinatorModelProvider: env("CIRCLE_COORDINATOR_MODEL_PROVIDER") ?? env("CIRCLE_MODEL_PROVIDER") ?? "deepseek",
-    coordinatorModelId: env("CIRCLE_COORDINATOR_MODEL_ID") ?? env("CIRCLE_MODEL_ID") ?? "deepseek-v4-flash",
+    coordinatorModelId: env("CIRCLE_COORDINATOR_MODEL_ID") ?? env("CIRCLE_MODEL_ID") ?? "deepseek-flash",
     workerModelProvider: env("CIRCLE_WORKER_MODEL_PROVIDER") ?? env("CIRCLE_MODEL_PROVIDER") ?? "deepseek",
-    workerModelId: env("CIRCLE_WORKER_MODEL_ID") ?? env("CIRCLE_MODEL_ID") ?? "deepseek-v4-flash",
+    workerModelId: env("CIRCLE_WORKER_MODEL_ID") ?? env("CIRCLE_MODEL_ID") ?? "deepseek-flash",
     coordinatorThinkingLevel:
       (env("CIRCLE_COORDINATOR_THINKING") as AppConfig["coordinatorThinkingLevel"]) ?? "low",
     workerThinkingLevel:

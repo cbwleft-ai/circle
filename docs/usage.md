@@ -35,11 +35,12 @@ npx pi /login   # 选择 deepseek，填入 API Key
 ```bash
 export CIRCLE_AGENT_DIR=/path/to/agent   # 默认 ~/.pi/agent
 export CIRCLE_MODEL_PROVIDER=deepseek    # 默认 deepseek
-export CIRCLE_MODEL_ID=deepseek-v4-flash # 默认 deepseek-v4-flash
+export CIRCLE_MODEL_ID=deepseek-flash # 默认 deepseek-flash
 ```
 
 > 模型注册信息（baseUrl、compat 等）可放在 `CIRCLE_AGENT_DIR/models.json` 中，
-> 本项目已针对 DeepSeek V4 Flash 内置了 provider 配置。
+> 本项目已针对 DeepSeek V4.1 Flash（`deepseek-flash`）内置了 provider 配置。
+> 该模型原生支持图片输入（vision），多模态无需额外注册视觉模型。
 
 ### 2.3 启动
 
@@ -281,7 +282,7 @@ npm start
 | `CIRCLE_SECRETS_DIR` | `~/.circle/secrets` | 密钥目录（飞书凭据 `feishu.json`，目录 0700 / 文件 0600） |
 | `CIRCLE_AGENT_DIR` | `~/.pi/agent` | pi 配置目录（模型/凭据） |
 | `CIRCLE_MODEL_PROVIDER` | `deepseek` | 模型 provider |
-| `CIRCLE_MODEL_ID` | `deepseek-v4-flash` | 模型 id |
+| `CIRCLE_MODEL_ID` | `deepseek-flash` | 模型 id |
 | `CIRCLE_COORDINATOR_THINKING` | `low` | Coordinator 思考级别 |
 | `CIRCLE_WORKER_THINKING` | `high` | Worker 思考级别 |
 | `CIRCLE_LONG_TASK_SEC` | `10` | 长程任务判定阈值（秒） |

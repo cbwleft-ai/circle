@@ -16,7 +16,7 @@ export type TaskPriority = "short" | "long";
 
 /** LLM 调用用量与费用（token 与美元计价，来自 pi AgentSession 的 usage 上报） */
 export interface TaskUsage {
-  /** 模型标识，如 deepseek/deepseek-v4-flash */
+  /** 模型标识，如 deepseek/deepseek-flash */
   model: string;
   /** LLM 调用次数 */
   calls: number;
