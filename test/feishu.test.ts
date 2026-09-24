@@ -8,8 +8,10 @@ import { join } from "node:path";
 import { runCase, type TestResult } from "./helpers.js";
 import {
   FeishuAdapter,
+  buildPostContent,
   decryptFeishuPayload,
   normalizeFeishuMessage,
+  splitMarkdown,
   stripMentions,
 } from "../src/im/feishu.js";
 import { conversationKeyOf } from "../src/core/conversation.js";
@@ -444,6 +446,118 @@ export async function runFeishuTests(): Promise<TestResult[]> {
         if (desc) Object.defineProperty(process.stdin, "isTTY", desc);
         else delete (process.stdin as { isTTY?: boolean }).isTTY;
       }
+    }),
+  );
+
+  results.push(
+    await runCase("F-11", "飞书渠道", "下行富文本：post + md 标签（标题/列表/代码块原样交给飞书渲染）", async (t) => {
+      const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
+      const fetchImpl = (async (url: unknown, init?: { body?: string }) => {
+        const u = String(url);
+        if (u.includes("app_access_token")) {
+          return new Response(JSON.stringify({ code: 0, tenant_access_token: "t-1", expire: 7200 }), { status: 200 });
+        }
+        calls.push({ url: u, body: JSON.parse(init?.body ?? "{}") as Record<string, unknown> });
+        return new Response(JSON.stringify({ code: 0 }), { status: 200 });
+      }) as unknown as typeof fetch;
+      const adapter = new FeishuAdapter({ appId: APP_ID, appSecret: APP_CRED, port: 0, fetchImpl });
+      const md = "## 标题\n\n- 项目一\n- 项目二\n\n**加粗** 与 `行内`\n\n```ts\nconst a = 1;\n```";
+      await adapter.send("fs:oc_1", md);
+      await adapter.send("fs:oc_1", "## 话题", { threadKey: "om_root" });
+      t.assertEqual(calls.length, 2, "两条短消息应各发一条");
+      t.assertEqual(calls[0]!.body.msg_type, "post", "应使用富文本 post");
+      const content = JSON.parse(calls[0]!.body.content as string) as {
+        zh_cn: { content: Array<Array<{ tag: string; text: string }>> };
+      };
+      t.assertEqual(content.zh_cn.content[0]![0]!.tag, "md", "应使用 md 标签");
+      t.assertEqual(
+        content.zh_cn.content[0]![0]!.text,
+        md,
+        "md.text 应为原始 Markdown（标题/列表/代码块原样交给飞书渲染）",
+      );
+      t.assert(calls[1]!.url.includes("/messages/om_root/reply"), `话题应走 reply API: ${calls[1]!.url}`);
+      t.assertEqual(calls[1]!.body.reply_in_thread, true, "话题富文本回复应 reply_in_thread=true");
+      t.assertEqual(calls[1]!.body.msg_type, "post", "话题回复同样应为富文本");
+    }),
+  );
+
+  results.push(
+    await runCase("F-12", "飞书渠道", "超长富文本分片：每片不超上限、代码围栏闭合", async (t) => {
+      const code = ["```ts", ...Array.from({ length: 2000 }, (_, i) => `const value_${i} = ${i};`), "```"].join("\n");
+      const md = `## 长代码\n\n${code}\n\n结尾说明`;
+      const chunks = splitMarkdown(md);
+      t.assert(chunks.length >= 2, `应分片，实际 ${chunks.length}`);
+      for (const [i, c] of chunks.entries()) {
+        const bytes = Buffer.byteLength(JSON.stringify(buildPostContent(c)), "utf-8");
+        t.assert(bytes <= 28_000, `第 ${i} 片应不超上限，实际 ${bytes} 字节`);
+        const fences = (c.match(/```/g) ?? []).length;
+        t.assert(fences % 2 === 0, `第 ${i} 片代码围栏应闭合，实际出现 ${fences} 次`);
+      }
+      t.assert(chunks.join("\n").includes("value_1999"), "末尾代码不应丢失");
+      t.assert(splitMarkdown("短文本").length === 1, "短文本不应分片");
+    }),
+  );
+
+  results.push(
+    await runCase("F-13", "飞书渠道", "富文本发送失败自动降级纯文本重试", async (t) => {
+      const calls: Array<{ body: Record<string, unknown> }> = [];
+      const fetchImpl = (async (url: unknown, init?: { body?: string }) => {
+        const u = String(url);
+        if (u.includes("app_access_token")) {
+          return new Response(JSON.stringify({ code: 0, tenant_access_token: "t-1", expire: 7200 }), { status: 200 });
+        }
+        calls.push({ body: JSON.parse(init?.body ?? "{}") as Record<string, unknown> });
+        return calls.length === 1
+          ? new Response("invalid markdown", { status: 400 })
+          : new Response(JSON.stringify({ code: 0 }), { status: 200 });
+      }) as unknown as typeof fetch;
+      const adapter = new FeishuAdapter({ appId: APP_ID, appSecret: APP_CRED, port: 0, fetchImpl });
+      await adapter.send("fs:oc_1", "# 标题");
+      t.assertEqual(calls.length, 2, "应触发一次降级重试");
+      t.assertEqual(calls[0]!.body.msg_type, "post", "首次应为富文本");
+      t.assertEqual(calls[1]!.body.msg_type, "text", "降级应为纯文本");
+      t.assertEqual(JSON.parse(calls[1]!.body.content as string), { text: "# 标题" }, "降级内容应为原文");
+    }),
+  );
+
+  results.push(
+    await runCase("F-14", "飞书渠道", "上行富文本 post：content_v2 优先与 content 回退", async (t) => {
+      const v2 = normalizeFeishuMessage({
+        message: {
+          message_id: "om_post1",
+          chat_id: "oc_p",
+          chat_type: "p2p",
+          message_type: "post",
+          content: JSON.stringify({ title: "t", content: [[{ tag: "text", text: "纯文本版" }]] }),
+          content_v2: JSON.stringify([[{ tag: "md", text: "**加粗** 与 [链接](https://x.y)" }]]),
+        },
+        sender: { sender_type: "user", sender_id: { open_id: "ou_a" } },
+      });
+      t.assertEqual(v2!.text, "**加粗** 与 [链接](https://x.y)", "应优先 content_v2 的原始 Markdown");
+
+      const v1 = normalizeFeishuMessage({
+        message: {
+          message_id: "om_post2",
+          chat_id: "oc_p",
+          chat_type: "p2p",
+          message_type: "post",
+          content: JSON.stringify({
+            title: "t",
+            content: [
+              [
+                { tag: "text", text: "第一行" },
+                { tag: "a", href: "https://x.y", text: "链接" },
+              ],
+              [{ tag: "code_block", language: "GO", text: "func main() {}" }],
+              [{ tag: "img", image_key: "img_v2_9" }],
+            ],
+          }),
+        },
+        sender: { sender_type: "user", sender_id: { open_id: "ou_a" } },
+      });
+      t.assert(v1!.text.includes("第一行[链接](https://x.y)"), `应还原超链接: ${v1!.text}`);
+      t.assert(v1!.text.includes("```go\nfunc main() {}\n```"), `应还原代码块: ${v1!.text}`);
+      t.assertEqual(v1!.imageKeys, ["img_v2_9"], "应提取富文本内嵌图片");
     }),
   );
 

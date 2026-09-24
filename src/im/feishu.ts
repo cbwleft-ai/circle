@@ -7,11 +7,15 @@
  * - mention 占位符清洗：@_user_N → @昵称（bot 自身 mention 剔除）；
  * - 群聊 @ 过滤：开启全量接收权限时，只有 @bot（或私聊）才会进入团队；
  * - 图片消息：调 im/v1/images 下载为附件（失败静默跳过，不阻塞消息）；
- * - 下行：话题内回复用 message.reply + reply_in_thread（避免脱话题/开新话题），
- *   主会话用 messages.create；文件发送暂未实现（AgentTeam 自动降级为文本提示）。
+ * - 富文本上行（post）：优先读 content_v2 中的 md 标签（保留原始 Markdown），
+ *   回退按 content 段落标签还原文本并提取内嵌图片（issue #64）；
+ * - 下行：统一以富文本 post + md 标签发送（飞书原生渲染 CommonMark 0.31 + GFM：
+ *   标题、加粗、列表、代码块、引用、表格等），超长内容分片，发送失败自动降级纯文本；
+ *   话题内回复用 message.reply + reply_in_thread（避免脱话题/开新话题），主会话用 messages.create；
+ *   文件发送暂未实现（AgentTeam 自动降级为文本提示）。
  *
- * 字段语义（root_id/thread_id 组合、图片下载返回体、reply_in_thread 行为）以飞书开放平台
- * 文档为准，接入时需用真实回调实测（见 issue #54「待实测确认」）。
+ * 字段语义（root_id/thread_id 组合、图片下载返回体、reply_in_thread 行为、post/md 结构）以
+ * 飞书开放平台文档为准，接入时需用真实回调实测（见 issue #54/#64「待实测确认」）。
  */
 import { createDecipheriv, createHash } from "node:crypto";
 import { EventDispatcher, LoggerLevel, WSClient } from "@larksuiteoapi/node-sdk";
@@ -58,6 +62,8 @@ export interface FeishuMessageEvent {
     chat_type?: string;
     message_type?: string;
     content?: string;
+    /** 富文本消息的原始内容（保留 md 标签，推荐优先读取；见飞书「接收消息内容结构」） */
+    content_v2?: string;
     mentions?: FeishuMention[];
   };
   sender?: {
@@ -111,19 +117,154 @@ export function decryptFeishuPayload(encryptKey: string, encrypted: string): str
 }
 
 function parseContent(content: string | undefined): Record<string, unknown> {
-  if (!content) return {};
+  const parsed = parseJsonValue(content);
+  return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {};
+}
+
+function parseJsonValue(content: string | undefined): unknown {
+  if (!content) return undefined;
   try {
-    const parsed = JSON.parse(content) as Record<string, unknown>;
-    return parsed && typeof parsed === "object" ? parsed : {};
+    return JSON.parse(content);
   } catch {
-    return {};
+    return undefined;
   }
+}
+
+/** 富文本 post 的节点（发送与接收结构的最小交集） */
+export interface FeishuPostNode {
+  tag?: string;
+  text?: string;
+  href?: string;
+  user_id?: string;
+  user_name?: string;
+  language?: string;
+  image_key?: string;
+}
+
+/** 富文本段落列表（content / content_v2 均为「段落数组」，段落内为节点数组） */
+function postParagraphs(parsed: unknown): unknown[] {
+  if (Array.isArray(parsed)) return parsed;
+  if (parsed && typeof parsed === "object" && Array.isArray((parsed as { content?: unknown }).content)) {
+    return (parsed as { content: unknown[] }).content;
+  }
+  return [];
+}
+
+/** 单个富文本节点 → 文本（纯函数）；图片 key 就地收集，代码块还原为围栏形式 */
+function flattenPostNode(node: FeishuPostNode, imageKeys: string[]): string {
+  switch (node.tag) {
+    case "text":
+      return node.text ?? "";
+    case "a":
+      return node.href ? `[${node.text ?? ""}](${node.href})` : (node.text ?? "");
+    case "at":
+      // user_id 形如 @_user_1，交由 stripMentions 依据 mentions 还原昵称/剔除 bot
+      return node.user_id ?? node.user_name ?? "";
+    case "code_block":
+      return `\`\`\`${(node.language ?? "").toLowerCase()}\n${node.text ?? ""}\n\`\`\``;
+    case "md":
+      return node.text ?? "";
+    case "img":
+      if (node.image_key) imageKeys.push(node.image_key);
+      return "[图片]";
+    case "media":
+      return "[视频]";
+    case "emotion":
+      return "";
+    case "hr":
+      return "---";
+    default:
+      return node.text ?? "";
+  }
+}
+
+/**
+ * 解析富文本段落结构（content 或 content_v2 的段落数组）为文本（纯函数）。
+ * content_v2 优先，因其 md 标签保留原始 Markdown；content 中 md 会被拆成其他标签。
+ */
+export function extractPostContent(parsed: unknown): { text: string; imageKeys: string[] } {
+  const imageKeys: string[] = [];
+  const paragraphs: string[] = [];
+  for (const paragraph of postParagraphs(parsed)) {
+    if (!Array.isArray(paragraph)) continue;
+    const line = paragraph.map((n) => flattenPostNode((n ?? {}) as FeishuPostNode, imageKeys)).join("");
+    if (line) paragraphs.push(line);
+  }
+  return { text: paragraphs.join("\n"), imageKeys };
+}
+
+/** 飞书富文本请求体上限 30KB（官方文档）；预留 JSON 转义与结构开销 */
+const POST_CONTENT_LIMIT_BYTES = 30_000;
+/** 单片目标字节数：接口上限基础上预留 JSON 转义与结构开销 */
+const POST_CHUNK_BYTES = Math.floor(POST_CONTENT_LIMIT_BYTES * 0.93); // ≈27.9KB
+
+/**
+ * 将 Markdown 包装为富文本 post 的 content 对象（纯函数）。
+ * 飞书文档推荐用 `md` 标签发送 Markdown（CommonMark 0.31 + GFM）。
+ * 注意：md 标签独占一个段落，不能与其他标签同行，因此整体包在单个 md 节点内。
+ */
+export function buildPostContent(markdown: string): Record<string, unknown> {
+  return { zh_cn: { content: [[{ tag: "md", text: markdown }]] } };
+}
+
+/** 富文本 post 序列化后的字节数（用于分片阈值判断） */
+function postContentBytes(markdown: string): number {
+  return Buffer.byteLength(JSON.stringify(buildPostContent(markdown)), "utf-8");
+}
+
+/** 超长单行兜底硬切（按字节逼近上限；无法保证语义边界） */
+function hardSplit(text: string, maxBytes: number): string[] {
+  const out: string[] = [];
+  let buf = "";
+  for (const ch of text) {
+    if (buf && postContentBytes(buf + ch) > maxBytes) {
+      out.push(buf);
+      buf = "";
+    }
+    buf += ch;
+  }
+  if (buf) out.push(buf);
+  return out;
+}
+
+/**
+ * 按飞书富文本体积上限切分 Markdown（纯函数）：
+ * - 优先在行边界切分；若切在代码围栏内，则补闭合围栏并在下片重开，保证每片语法完整；
+ * - 极端超长单行（压缩后的代码/JSON）最终按字节硬切兜底。
+ */
+export function splitMarkdown(text: string, maxBytes = POST_CHUNK_BYTES): string[] {
+  if (postContentBytes(text) <= maxBytes) return [text];
+  const chunks: string[] = [];
+  let cur: string[] = [];
+  let inFence = false;
+  let fenceLang = "";
+  const flush = () => {
+    if (cur.length > 0) {
+      chunks.push(cur.join("\n"));
+      cur = [];
+    }
+  };
+  for (const line of text.split("\n")) {
+    if (cur.length > 0 && postContentBytes([...cur, line].join("\n")) > maxBytes) {
+      if (inFence) cur.push("```");
+      flush();
+      if (inFence) cur.push("```" + fenceLang);
+    }
+    if (/^\s*```/.test(line)) {
+      if (!inFence) fenceLang = line.trim().replace(/^```+/, "").trim();
+      inFence = !inFence;
+    }
+    cur.push(line);
+  }
+  flush();
+  return chunks.flatMap((c) => (postContentBytes(c) <= maxBytes ? [c] : hardSplit(c, maxBytes)));
 }
 
 /**
  * 归一化飞书消息事件（纯函数）：
  * - 忽略 app/bot 自身消息；
  * - 文本消息解析 text，图片消息提取 image_key（下载由适配器完成）；
+ * - 富文本 post：优先 content_v2（md 标签保留原始 Markdown），回退 content 段落还原；
  * - threadKey = root_id ?? thread_id（话题/回复串；缺省为群主会话）；
  * - mentionedBot：mentions 中是否包含 bot（全量接收时的 @ 过滤依据）。
  */
@@ -135,15 +276,25 @@ export function normalizeFeishuMessage(
   if (!msg?.chat_id || !msg.message_id) return undefined;
   if (event.sender?.sender_type === "app") return undefined;
 
-  const content = parseContent(msg.content);
   const mentions = msg.mentions ?? [];
-  const rawText = msg.message_type === "text" && typeof content.text === "string" ? content.text : "";
-  const text = stripMentions(rawText, mentions, opts.botOpenId);
-
   const imageKeys: string[] = [];
-  if (msg.message_type === "image" && typeof content.image_key === "string") {
-    imageKeys.push(content.image_key);
+  let rawText = "";
+
+  if (msg.message_type === "text") {
+    const content = parseContent(msg.content);
+    if (typeof content.text === "string") rawText = content.text;
+  } else if (msg.message_type === "image") {
+    const content = parseContent(msg.content);
+    if (typeof content.image_key === "string") imageKeys.push(content.image_key);
+  } else if (msg.message_type === "post") {
+    // content_v2 的 md 标签保留原始 Markdown；若为空则回退到 content 的段落标签
+    const v2 = extractPostContent(parseJsonValue(msg.content_v2));
+    const rich = v2.text ? v2 : extractPostContent(parseJsonValue(msg.content));
+    rawText = rich.text;
+    imageKeys.push(...rich.imageKeys);
   }
+
+  const text = stripMentions(rawText, mentions, opts.botOpenId);
   if (!text && imageKeys.length === 0) return undefined;
 
   const sid = event.sender?.sender_id;
@@ -417,32 +568,69 @@ export class FeishuAdapter implements ImAdapter {
   }
 
   /**
-   * 下行发送：
+   * 下行发送：将 Markdown 以富文本 post + md 标签发送（飞书原生渲染 CommonMark + GFM）。
    * - target.threadKey 存在 → message.reply + reply_in_thread（落回原话题/回复串）；
-   * - 否则 → messages.create 发到 chat_id（私聊/群根级）。
+   * - 否则 → messages.create 发到 chat_id（私聊/群根级）；
+   * - 超过单条体积上限时自动分片；富文本发送失败则降级为纯文本重试（issue #64）。
    */
   async send(chatId: string, text: string, target?: OutboundTarget): Promise<void> {
     const token = await this.tenantAccessToken();
     const receiveId = chatId.startsWith("fs:") ? chatId.slice(3) : chatId;
-    let url: string;
-    let body: Record<string, unknown>;
-    if (target?.threadKey) {
-      url = `${this.baseUrl}/open-apis/im/v1/messages/${encodeURIComponent(target.threadKey)}/reply`;
-      body = { content: JSON.stringify({ text }), msg_type: "text", reply_in_thread: true };
-    } else {
-      url = `${this.baseUrl}/open-apis/im/v1/messages?receive_id_type=chat_id`;
-      body = { receive_id: receiveId, msg_type: "text", content: JSON.stringify({ text }) };
+    const chunks = splitMarkdown(text);
+    for (const chunk of chunks) {
+      await this.deliver(token, receiveId, chunk, target);
     }
-    const res = await this.fetchImpl(url, {
+    log.info(
+      "im:feishu",
+      `下行消息 → ${chatId}${target?.threadKey ? `#${target.threadKey}` : ""}${chunks.length > 1 ? `（${chunks.length} 片）` : ""}: ${text.slice(0, 200)}`,
+    );
+  }
+
+  /** 发送单片富文本；失败时降级纯文本重试，仍失败则抛错 */
+  private async deliver(
+    token: string,
+    receiveId: string,
+    markdown: string,
+    target: OutboundTarget | undefined,
+  ): Promise<void> {
+    const post = this.messageRequest(receiveId, target, "post", JSON.stringify(buildPostContent(markdown)));
+    const res = await this.post(token, post);
+    if (res.ok) return;
+    const detail = await res.text().catch(() => "");
+    log.warn("im:feishu", `富文本发送失败（HTTP ${res.status}），降级纯文本重试: ${detail.slice(0, 200)}`);
+    const fallback = this.messageRequest(receiveId, target, "text", JSON.stringify({ text: markdown }));
+    const res2 = await this.post(token, fallback);
+    if (!res2.ok) {
+      const detail2 = await res2.text().catch(() => "");
+      throw new Error(`飞书发送失败（HTTP ${res2.status}）: ${detail2.slice(0, 200)}`);
+    }
+  }
+
+  /** 组装发送/回复请求：话题回复走 reply API，根级走 create */
+  private messageRequest(
+    receiveId: string,
+    target: OutboundTarget | undefined,
+    msgType: string,
+    content: string,
+  ): { url: string; body: Record<string, unknown> } {
+    if (target?.threadKey) {
+      return {
+        url: `${this.baseUrl}/open-apis/im/v1/messages/${encodeURIComponent(target.threadKey)}/reply`,
+        body: { content, msg_type: msgType, reply_in_thread: true },
+      };
+    }
+    return {
+      url: `${this.baseUrl}/open-apis/im/v1/messages?receive_id_type=chat_id`,
+      body: { receive_id: receiveId, msg_type: msgType, content },
+    };
+  }
+
+  private post(token: string, req: { url: string; body: Record<string, unknown> }): Promise<Response> {
+    return this.fetchImpl(req.url, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-      body: JSON.stringify(body),
+      body: JSON.stringify(req.body),
     });
-    if (!res.ok) {
-      const detail = await res.text().catch(() => "");
-      throw new Error(`飞书发送失败（HTTP ${res.status}）: ${detail.slice(0, 200)}`);
-    }
-    log.info("im:feishu", `下行消息 → ${chatId}${target?.threadKey ? `#${target.threadKey}` : ""}: ${text.slice(0, 200)}`);
   }
 }
 
