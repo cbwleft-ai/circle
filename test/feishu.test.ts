@@ -11,6 +11,7 @@ import {
   FeishuAdapter,
   buildPostContent,
   decryptFeishuPayload,
+  extractQuotedText,
   inferFeishuFileType,
   normalizeFeishuMessage,
   splitMarkdown,
@@ -56,6 +57,24 @@ async function withEnv(vars: Record<string, string | undefined>, fn: () => Promi
       else process.env[k] = v;
     }
   }
+}
+
+/** 模拟 fetch：token + 被引用消息查询（GET /im/v1/messages/{id}），返回指定文本或 HTTP 错误 */
+function quotedFetch(quotedText: string | undefined, status = 200): typeof fetch {
+  return (async (url: unknown) => {
+    const u = String(url);
+    if (u.includes("app_access_token")) {
+      return new Response(JSON.stringify({ code: 0, tenant_access_token: "t-1", expire: 7200 }), { status: 200 });
+    }
+    if (status !== 200) return new Response("forbidden", { status });
+    return new Response(
+      JSON.stringify({
+        code: 0,
+        data: { items: [{ msg_type: "text", body: { content: JSON.stringify({ text: quotedText }) } }] },
+      }),
+      { status: 200 },
+    );
+  }) as unknown as typeof fetch;
 }
 
 export async function runFeishuTests(): Promise<TestResult[]> {
@@ -648,6 +667,70 @@ export async function runFeishuTests(): Promise<TestResult[]> {
       }
       t.assert(threw.includes("文件过大"), `超限应抛出可读错误，实际: ${threw}`);
       t.assertEqual(uploads.length, 0, "超限时不应发起上传");
+    }),
+  );
+
+  results.push(
+    await runCase("F-16", "飞书渠道", "引用/回复消息：取回被引用内容并注入上下文（含兜底）", async (t) => {
+      // 1) 归一化：parent_id → quotedMessageId
+      const norm = normalizeFeishuMessage({
+        message: {
+          message_id: "om_new",
+          parent_id: "om_old",
+          chat_id: "oc_q",
+          chat_type: "p2p",
+          message_type: "text",
+          content: JSON.stringify({ text: "按这个来" }),
+        },
+        sender: { sender_type: "user", sender_id: { open_id: "ou_a" } },
+      });
+      t.assertEqual(norm!.quotedMessageId, "om_old", "parent_id 应归一化为 quotedMessageId");
+      t.assertEqual(norm!.text, "按这个来", "用户消息文本不应被污染");
+
+      // 2) 纯函数：从被引用消息体提取可读文本
+      t.assertEqual(extractQuotedText("text", JSON.stringify({ text: "原消息" })), "原消息", "text 应取 content.text");
+      t.assertEqual(
+        extractQuotedText("post", JSON.stringify({ content: [[{ tag: "text", text: "富文本原消息" }]] })),
+        "富文本原消息",
+        "post 应还原富文本",
+      );
+      t.assertEqual(extractQuotedText("image", undefined), "[图片]", "图片应给类型提示");
+      t.assertEqual(extractQuotedText("text", JSON.stringify({ text: "  " })), undefined, "空内容应返回 undefined 交兜底");
+
+      // 3) emitMessage：取回被引用内容后以自然语言前缀注入
+      const mkAdapter = (fetchImpl: typeof fetch) => {
+        const adapter = new FeishuAdapter({ appId: APP_ID, appSecret: APP_CRED, port: 0, fetchImpl });
+        const got: string[] = [];
+        adapter.onMessage((m) => got.push(m.text));
+        return { adapter, got };
+      };
+      const baseEvent = (messageId: string, parentId?: string) => ({
+        message: {
+          message_id: messageId,
+          ...(parentId ? { parent_id: parentId } : {}),
+          chat_id: "oc_q",
+          chat_type: "p2p",
+          message_type: "text",
+          content: JSON.stringify({ text: "按这个来" }),
+        },
+        sender: { sender_type: "user", sender_id: { open_id: "ou_a" } },
+      });
+
+      const ok = mkAdapter(quotedFetch("原消息"));
+      await ok.adapter.handleRawEvent(baseEvent("om_new2", "om_old2"));
+      t.assertEqual(ok.got[0], "被引用内容：原消息\n用户消息：按这个来", "应注入被引用内容");
+
+      // 4) 取回失败：可读兜底（不静默丢失）
+      const fail = mkAdapter(quotedFetch(undefined, 403));
+      await fail.adapter.handleRawEvent(baseEvent("om_new3", "om_old3"));
+      t.assert(fail.got[0]!.startsWith("被引用内容："), `失败应兜底: ${fail.got[0]}`);
+      t.assert(fail.got[0]!.includes("om_old3") && fail.got[0]!.includes("内容不可见"), `兜底应含消息 id: ${fail.got[0]}`);
+      t.assert(fail.got[0]!.endsWith("用户消息：按这个来"), `失败时用户消息仍应保留: ${fail.got[0]}`);
+
+      // 5) 无 parent_id：不注入
+      const none = mkAdapter(quotedFetch("原消息"));
+      await none.adapter.handleRawEvent(baseEvent("om_new4"));
+      t.assertEqual(none.got[0], "按这个来", "无引用不应加前缀");
     }),
   );
 

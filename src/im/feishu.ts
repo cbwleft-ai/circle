@@ -9,6 +9,10 @@
  * - 图片消息：调 im/v1/images 下载为附件（失败静默跳过，不阻塞消息）；
  * - 富文本上行（post）：优先读 content_v2 中的 md 标签（保留原始 Markdown），
  *   回退按 content 段落标签还原文本并提取内嵌图片（issue #64）；
+ * - 引用/回复消息（issue #66）：事件只带被引用消息 id（`parent_id`），
+ *   emitMessage 经 `GET /im/v1/messages/{message_id}` 取回内容，以
+ *   「被引用内容：…\n用户消息：…」前缀注入（与微信 iLink #25 做法一致）；
+ *   取不到时给出可读兜底提示，不静默丢失；
  * - 下行：统一以富文本 post + md 标签发送（飞书原生渲染 CommonMark 0.31 + GFM：
  *   标题、加粗、列表、代码块、引用、表格等），超长内容分片，发送失败自动降级纯文本；
  *   话题内回复用 message.reply + reply_in_thread（避免脱话题/开新话题），主会话用 messages.create；
@@ -83,6 +87,8 @@ export interface NormalizedFeishuMessage {
   imageKeys: string[];
   messageId: string;
   mentionedBot: boolean;
+  /** 被引用/被回复的消息 id（issue #66）：飞书事件 `parent_id`，内容需另取 */
+  quotedMessageId?: string;
 }
 
 /**
@@ -285,6 +291,44 @@ export function splitMarkdown(text: string, maxBytes = POST_CHUNK_BYTES): string
   return chunks.flatMap((c) => (postContentBytes(c) <= maxBytes ? [c] : hardSplit(c, maxBytes)));
 }
 
+/** 被引用消息类型 → 可读类型提示（issue #66） */
+function quotedTypeHint(msgType: string): string {
+  switch (msgType) {
+    case "image":
+      return "[图片]";
+    case "file":
+      return "[文件]";
+    case "audio":
+      return "[语音]";
+    case "media":
+      return "[视频]";
+    case "sticker":
+      return "[表情]";
+    case "interactive":
+      return "[卡片]";
+    default:
+      return `[${msgType}]`;
+  }
+}
+
+/**
+ * 从被引用消息（`GET /im/v1/messages/{id}` 返回的 item）提取可读文本（纯函数，issue #66）。
+ * - text：解析 content.text；post：还原富文本为 Markdown；
+ * - 图片/文件等非文本：返回类型提示；内容为空时返回 undefined，交由调用方兜底。
+ */
+export function extractQuotedText(msgType: string, content: string | undefined): string | undefined {
+  if (msgType === "text") {
+    const parsed = parseContent(content);
+    const text = typeof parsed.text === "string" ? parsed.text.trim() : "";
+    return text || undefined;
+  }
+  if (msgType === "post") {
+    const text = extractPostContent(parseJsonValue(content)).text.trim();
+    return text || undefined;
+  }
+  return quotedTypeHint(msgType);
+}
+
 /**
  * 归一化飞书消息事件（纯函数）：
  * - 忽略 app/bot 自身消息；
@@ -336,6 +380,9 @@ export function normalizeFeishuMessage(
     imageKeys,
     messageId: msg.message_id,
     mentionedBot,
+    // parent_id = 被回复/被引用消息 id（飞书「回复」与「引用」同一套语义）；
+    // upper_message_id 是合并转发树的直接父节点，不是引用，勿用。
+    quotedMessageId: msg.parent_id || undefined,
   };
 }
 
@@ -527,19 +574,27 @@ export class FeishuAdapter implements ImAdapter {
     return payload;
   }
 
-  /** 归一化消息 → 下载图片附件 → 交给团队 */
+  /** 归一化消息 → 下载图片附件 → 还原引用内容 → 交给团队 */
   private async emitMessage(normalized: NormalizedFeishuMessage): Promise<void> {
     const attachments: ChatAttachment[] = [];
     for (const key of normalized.imageKeys) {
       const att = await this.downloadImage(key);
       if (att) attachments.push(att);
     }
+    let text = normalized.text;
+    // 引用/回复消息（issue #66）：取回被引用内容并以自然语言前缀注入上下文；
+    // 取不到时给出可读兜底，不静默丢失。
+    if (normalized.quotedMessageId && normalized.quotedMessageId !== normalized.messageId) {
+      const quoted = await this.fetchQuotedText(normalized.quotedMessageId);
+      const quoteLine = `被引用内容：${quoted ?? `[消息 ${normalized.quotedMessageId}（内容不可见）`}`;
+      text = text ? `${quoteLine}\n用户消息：${text}` : quoteLine;
+    }
     const msg: ChatMessage = {
       chatId: normalized.chatId,
       chatType: normalized.chatType,
       threadKey: normalized.threadKey,
       senderId: normalized.senderId,
-      text: normalized.text,
+      text,
       attachments: attachments.length > 0 ? attachments : undefined,
     };
     log.info(
@@ -547,6 +602,31 @@ export class FeishuAdapter implements ImAdapter {
       `转发给团队 → ${normalized.chatId}${normalized.threadKey ? `#${normalized.threadKey}` : ""}（${normalized.chatType}）: ${msg.text.slice(0, 200)}${attachments.length > 0 ? `（附件 ${attachments.length} 个）` : ""}`,
     );
     this.handler?.(msg);
+  }
+
+  /**
+   * 取回被引用消息内容（issue #66）：`GET /open-apis/im/v1/messages/{message_id}`。
+   * 内容需机器人位于消息所在会话且有读取权限；取不到返回 undefined，由调用方兜底。
+   */
+  private async fetchQuotedText(messageId: string): Promise<string | undefined> {
+    try {
+      const token = await this.tenantAccessToken();
+      const res = await this.fetchImpl(`${this.baseUrl}/open-apis/im/v1/messages/${encodeURIComponent(messageId)}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) {
+        log.warn("im:feishu", `被引用消息取回失败（HTTP ${res.status}）: ${messageId}`);
+        return undefined;
+      }
+      const data = (await res.json()) as {
+        data?: { items?: Array<{ msg_type?: string; body?: { content?: string } }> };
+      };
+      const item = data.data?.items?.[0];
+      return item?.msg_type ? extractQuotedText(item.msg_type, item.body?.content) : undefined;
+    } catch (e) {
+      log.warn("im:feishu", `被引用消息取回失败: ${(e as Error).message}`);
+      return undefined;
+    }
   }
 
   /** 下载图片（image_key → base64 附件）；失败静默返回 undefined */
