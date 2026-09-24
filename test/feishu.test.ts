@@ -7,9 +7,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runCase, type TestResult } from "./helpers.js";
 import {
+  FEISHU_FILE_MAX_BYTES,
   FeishuAdapter,
   buildPostContent,
   decryptFeishuPayload,
+  inferFeishuFileType,
   normalizeFeishuMessage,
   splitMarkdown,
   stripMentions,
@@ -558,6 +560,94 @@ export async function runFeishuTests(): Promise<TestResult[]> {
       t.assert(v1!.text.includes("第一行[链接](https://x.y)"), `应还原超链接: ${v1!.text}`);
       t.assert(v1!.text.includes("```go\nfunc main() {}\n```"), `应还原代码块: ${v1!.text}`);
       t.assertEqual(v1!.imageKeys, ["img_v2_9"], "应提取富文本内嵌图片");
+    }),
+  );
+
+  results.push(
+    await runCase("F-15", "飞书渠道", "sendFile：图片/文件上传后按对应消息类型发送（含话题/超限）", async (t) => {
+      interface UploadCall {
+        url: string;
+        auth?: string;
+        form?: FormData;
+      }
+      interface MsgCall {
+        url: string;
+        body?: Record<string, unknown>;
+      }
+      const uploads: UploadCall[] = [];
+      const msgs: MsgCall[] = [];
+      const fetchImpl = (async (url: unknown, init?: { body?: unknown; headers?: Record<string, string> }) => {
+        const u = String(url);
+        if (u.includes("app_access_token")) {
+          return new Response(JSON.stringify({ code: 0, tenant_access_token: "t-1", expire: 7200 }), { status: 200 });
+        }
+        if (u.includes("/im/v1/images")) {
+          uploads.push({ url: u, auth: init?.headers?.Authorization, form: init?.body as FormData });
+          return new Response(JSON.stringify({ code: 0, data: { image_key: "img-key" } }), { status: 200 });
+        }
+        if (u.includes("/im/v1/files")) {
+          uploads.push({ url: u, auth: init?.headers?.Authorization, form: init?.body as FormData });
+          return new Response(JSON.stringify({ code: 0, data: { file_key: "file-key" } }), { status: 200 });
+        }
+        msgs.push({ url: u, body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
+        return new Response(JSON.stringify({ code: 0 }), { status: 200 });
+      }) as unknown as typeof fetch;
+      const adapter = new FeishuAdapter({
+        appId: APP_ID,
+        appSecret: APP_CRED,
+        port: 0,
+        baseUrl: "https://open.feishu.cn",
+        fetchImpl,
+      });
+
+      // 文件类：话题内回复 → file 消息
+      await adapter.sendFile(
+        "fs:oc_1",
+        { fileName: "report.md", content: Buffer.from("# 报告"), size: 7, mimeType: "text/markdown" },
+        { threadKey: "om_root" },
+      );
+      const fileUpload = uploads.find((c) => c.url.includes("/im/v1/files"));
+      t.assert(fileUpload !== undefined, "应上传文件到 im/v1/files");
+      t.assertEqual(fileUpload!.form?.get("file_type"), "stream", "md 应映射为 file_type=stream");
+      t.assertEqual(fileUpload!.form?.get("file_name"), "report.md", "应携带 file_name");
+      t.assertEqual(fileUpload!.auth, "Bearer t-1", "上传应带 tenant_access_token");
+      const fileMsg = msgs.find((c) => c.url.includes("/messages/om_root/reply"));
+      t.assert(fileMsg !== undefined, "文件应走话题 reply API");
+      t.assertEqual(fileMsg!.body?.msg_type, "file", "应为 file 消息");
+      t.assertEqual(fileMsg!.body?.reply_in_thread, true, "话题回复应 reply_in_thread=true");
+      t.assertEqual(JSON.parse(String(fileMsg!.body?.content)), { file_key: "file-key" }, "文件消息应携带 file_key");
+
+      // 图片类：根级 → image 消息
+      uploads.length = 0;
+      msgs.length = 0;
+      await adapter.sendFile("fs:oc_1", {
+        fileName: "chart.png",
+        content: Buffer.from([0x89, 0x50]),
+        size: 2,
+        mimeType: "image/png",
+      });
+      const imgUpload = uploads.find((c) => c.url.includes("/im/v1/images"));
+      t.assert(imgUpload !== undefined, "应上传图片到 im/v1/images");
+      t.assertEqual(imgUpload!.form?.get("image_type"), "message", "image_type 应为 message");
+      const imgMsg = msgs.find((c) => c.url.includes("receive_id_type=chat_id"));
+      t.assert(imgMsg !== undefined, "图片应走根级 create");
+      t.assertEqual(imgMsg!.body?.msg_type, "image", "应为 image 消息");
+      t.assertEqual(JSON.parse(String(imgMsg!.body?.content)), { image_key: "img-key" }, "图片消息应携带 image_key");
+
+      // file_type 映射（非图片/文档类回退 stream）
+      t.assertEqual(inferFeishuFileType("a.pdf"), "pdf", "pdf 应映射为 pdf");
+      t.assertEqual(inferFeishuFileType("a.csv"), "stream", "csv 应回退为 stream");
+
+      // 超限：本地预检直接拒绝，不发起上传
+      uploads.length = 0;
+      let threw = "";
+      try {
+        await adapter.sendFile("fs:oc_1", { fileName: "big.bin", content: Buffer.alloc(1), size: FEISHU_FILE_MAX_BYTES + 1 });
+      } catch (e) {
+        threw = (e as Error).message;
+      }
+      t.assert(threw.includes("文件过大"), `超限应抛出可读错误，实际: ${threw}`);
+      t.assertEqual(uploads.length, 0, "超限时不应发起上传");
     }),
   );
 

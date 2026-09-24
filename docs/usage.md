@@ -272,7 +272,9 @@ npm start
   - 话题内的回复经 `message.reply + reply_in_thread` 落回原话题；长任务完成后的汇报同样回原话题；
   - 群聊内连续消息与图片按 `(会话, 发送者)` 分片，不跨人合并/错配；
 - 话题首次唤醒目前只带当前消息，**不注入话题历史与群历史**（后续增强见 #54「待实测确认」）；
-- 文件（非图片）发送暂未实现，产出物发送自动降级为文本 + 路径提示。
+- 文件/图片附件发送（issue #65）：产出物先上传 `im/v1/images`（得 `image_key`）或
+  `im/v1/files`（得 `file_key`），再发 `image`/`file` 消息；话题场景同样走 `reply + reply_in_thread`；
+  图片上限约 10MB（超出按文件发送）、文件上限约 30MB，超限或上传失败时自动降级为文本 + 路径提示。
 
 ### 富文本（Markdown）
 
@@ -385,7 +387,9 @@ Coordinator：（调用 send_artifact 后）已发送：report.md ✓
 > `send_artifact` 额外受 **20MB 大小上限**约束；当前 IM 通道不支持文件发送时
 > 自动降级为文字提示（附文件名/大小/产出物路径），不阻塞主流程。
 > 微信 iLink 通道支持文件（type 4）与图片（type 2）消息，走官方上传链路
-> （getuploadurl → AES-128-ECB 加密 → CDN → sendmessage）。
+> （getuploadurl → AES-128-ECB 加密 → CDN → sendmessage）；
+> 飞书通道支持图片（`image` 消息，约 10MB）与文件（`file` 消息，约 30MB），
+> 走 `im/v1/images` / `im/v1/files` 上传后发消息（见 #65）。
 
 ## 10. 连续消息合并（照片 + 描述 → 一条回复）
 
