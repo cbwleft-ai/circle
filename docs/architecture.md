@@ -188,7 +188,8 @@ sequenceDiagram
 >
 > **产物可直接发送（issue #24）**：Coordinator 可通过 `send_artifact` 把产出物文件**作为附件
 > 直接发送给用户**（微信 iLink 通道走官方上传链路：getuploadurl → AES-128-ECB 加密 → CDN →
-> type 4 文件/type 2 图片消息；上限 20MB）。通道不支持文件时自动降级为文字提示（附文件名/大小/路径），
+> type 4 文件/type 2 图片消息；飞书通道走 `im/v1/images` / `im/v1/files` 上传后发 image/file 消息，见 #65；
+> 上限 20MB）。通道不支持文件时自动降级为文字提示（附文件名/大小/路径），
 > 不阻塞主流程。
 
 ### 3.3 定时任务
@@ -308,7 +309,7 @@ sequenceDiagram
 | 定时任务存储 | `src/core/schedule-store.ts` | JSON 持久化、触发历史 |
 | 工作空间 | `src/core/workspace.ts` | Worker 目录/任务工作空间（`tasks/<id>`）/产出物归档（`outputs/<id>`）/过期清理；产出物只读访问（清单 + 文本读取 + 原始字节读取，防目录穿越/二进制拒绝/大小上限） |
 | 文本工具 | `src/core/text.ts` | `summarizeText`（头尾兼顾摘要）、`formatBytes`、`inferMimeType` |
-| IM 适配器 | `src/im/*` | 统一接口，console/http/weixin(官方)/wechat(wechaty) 四实现；`sendFile` 可选（微信通道支持文件/图片附件） |
+| IM 适配器 | `src/im/*` | 统一接口，console/http/weixin(官方)/feishu(飞书)/wechat(wechaty) 实现；`sendFile` 可选（微信与飞书通道支持文件/图片附件） |
 | 团队 | `src/team/agent-team.ts` | 组合三角色、消息路由、轮次状态检查、结果汇报、产出物网关（`listArtifacts`/`readArtifact`/`getTaskResult`/`sendArtifact`） |
 
 ## 5. 数据模型

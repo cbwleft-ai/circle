@@ -12,7 +12,8 @@
  * - 下行：统一以富文本 post + md 标签发送（飞书原生渲染 CommonMark 0.31 + GFM：
  *   标题、加粗、列表、代码块、引用、表格等），超长内容分片，发送失败自动降级纯文本；
  *   话题内回复用 message.reply + reply_in_thread（避免脱话题/开新话题），主会话用 messages.create；
- *   文件发送暂未实现（AgentTeam 自动降级为文本提示）。
+ * - 文件/图片附件（issue #65）：先上传 im/v1/images（image_key）或 im/v1/files（file_key），
+ *   再发 image/file 消息，话题场景同样走 reply + reply_in_thread；超限/失败由 AgentTeam 降级为文本提示。
  *
  * 字段语义（root_id/thread_id 组合、图片下载返回体、reply_in_thread 行为、post/md 结构）以
  * 飞书开放平台文档为准，接入时需用真实回调实测（见 issue #54/#64「待实测确认」）。
@@ -21,7 +22,7 @@ import { createDecipheriv, createHash } from "node:crypto";
 import { EventDispatcher, LoggerLevel, WSClient } from "@larksuiteoapi/node-sdk";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { log } from "../core/logger.js";
-import type { ChatAttachment, ChatMessage, OutboundTarget } from "../core/types.js";
+import type { ChatAttachment, ChatMessage, OutboundFile, OutboundTarget } from "../core/types.js";
 import type { ImAdapter } from "./adapter.js";
 
 export interface FeishuOptions {
@@ -197,6 +198,30 @@ export function extractPostContent(parsed: unknown): { text: string; imageKeys: 
 const POST_CONTENT_LIMIT_BYTES = 30_000;
 /** 单片目标字节数：接口上限基础上预留 JSON 转义与结构开销 */
 const POST_CHUNK_BYTES = Math.floor(POST_CONTENT_LIMIT_BYTES * 0.93); // ≈27.9KB
+
+/** 飞书图片消息大小上限（约 10MB，以开放平台文档为准） */
+export const FEISHU_IMAGE_MAX_BYTES = 10 * 1024 * 1024;
+/** 飞书文件消息大小上限（约 30MB，以开放平台文档为准） */
+export const FEISHU_FILE_MAX_BYTES = 30 * 1024 * 1024;
+
+/** 扩展名 → 飞书 file_type（仅支持官方枚举，其余一律按 stream 发送） */
+const FEISHU_FILE_TYPE_BY_EXT: Record<string, string> = {
+  opus: "opus",
+  mp4: "mp4",
+  pdf: "pdf",
+  doc: "doc",
+  docx: "doc",
+  xls: "xls",
+  xlsx: "xls",
+  ppt: "ppt",
+  pptx: "ppt",
+};
+
+/** 推断飞书文件上传所需 file_type（纯函数） */
+export function inferFeishuFileType(fileName: string): string {
+  const ext = fileName.split(".").pop()?.toLowerCase() ?? "";
+  return FEISHU_FILE_TYPE_BY_EXT[ext] ?? "stream";
+}
 
 /**
  * 将 Markdown 包装为富文本 post 的 content 对象（纯函数）。
@@ -604,6 +629,85 @@ export class FeishuAdapter implements ImAdapter {
       const detail2 = await res2.text().catch(() => "");
       throw new Error(`飞书发送失败（HTTP ${res2.status}）: ${detail2.slice(0, 200)}`);
     }
+  }
+
+  /**
+   * 下行发送文件/图片附件（issue #65）：
+   * - 图片（mimeType 为 image/* 且 ≤10MB）→ 上传 im/v1/images 得 image_key，发 image 消息；
+   * - 其它（含超 10MB 的图片）→ 上传 im/v1/files 得 file_key，发 file 消息；
+   * - 话题/回复串沿用 messageRequest（reply + reply_in_thread）；
+   * - caption 作为独立文本先发；上传/发送失败抛错，由 AgentTeam 降级为文本提示。
+   */
+  async sendFile(chatId: string, file: OutboundFile, target?: OutboundTarget): Promise<void> {
+    if (file.size > FEISHU_FILE_MAX_BYTES) {
+      throw new Error(`文件过大（${file.size} 字节），飞书通道上限 ${FEISHU_FILE_MAX_BYTES} 字节`);
+    }
+    const token = await this.tenantAccessToken();
+    const receiveId = chatId.startsWith("fs:") ? chatId.slice(3) : chatId;
+    const isImage = (file.mimeType ?? "").startsWith("image/") && file.size <= FEISHU_IMAGE_MAX_BYTES;
+
+    let msgType: string;
+    let content: string;
+    if (isImage) {
+      const imageKey = await this.uploadImage(token, file);
+      msgType = "image";
+      content = JSON.stringify({ image_key: imageKey });
+    } else {
+      const fileKey = await this.uploadFile(token, file);
+      msgType = "file";
+      content = JSON.stringify({ file_key: fileKey });
+    }
+
+    // 先发随附说明（独立文本消息），再发附件消息，与微信通道行为对齐
+    if (file.caption) {
+      await this.send(chatId, file.caption, target);
+    }
+
+    const res = await this.post(token, this.messageRequest(receiveId, target, msgType, content));
+    if (!res.ok) {
+      const detail = await res.text().catch(() => "");
+      throw new Error(`飞书${isImage ? "图片" : "文件"}发送失败（HTTP ${res.status}）: ${detail.slice(0, 200)}`);
+    }
+    log.info(
+      "im:feishu",
+      `已发送${isImage ? "图片" : "文件"}消息 → ${chatId}${target?.threadKey ? `#${target.threadKey}` : ""}: ${file.fileName}（${file.size} B）`,
+    );
+  }
+
+  /** 上传图片，返回 image_key（im/v1/images，multipart/form-data） */
+  private async uploadImage(token: string, file: OutboundFile): Promise<string> {
+    const form = new FormData();
+    form.append("image_type", "message");
+    form.append("image", new Blob([file.content], { type: file.mimeType ?? "application/octet-stream" }), file.fileName);
+    const res = await this.fetchImpl(`${this.baseUrl}/open-apis/im/v1/images`, {
+      method: "POST",
+      // 不手动设置 Content-Type，交由 fetch 自动生成 multipart boundary
+      headers: { Authorization: `Bearer ${token}` },
+      body: form,
+    });
+    const data = (await res.json().catch(() => ({}))) as { msg?: string; data?: { image_key?: string } };
+    if (!res.ok || !data.data?.image_key) {
+      throw new Error(`飞书图片上传失败（HTTP ${res.status}）: ${data.msg ?? "未返回 image_key"}`);
+    }
+    return data.data.image_key;
+  }
+
+  /** 上传文件，返回 file_key（im/v1/files，multipart/form-data） */
+  private async uploadFile(token: string, file: OutboundFile): Promise<string> {
+    const form = new FormData();
+    form.append("file_type", inferFeishuFileType(file.fileName));
+    form.append("file_name", file.fileName);
+    form.append("file", new Blob([file.content]), file.fileName);
+    const res = await this.fetchImpl(`${this.baseUrl}/open-apis/im/v1/files`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}` },
+      body: form,
+    });
+    const data = (await res.json().catch(() => ({}))) as { msg?: string; data?: { file_key?: string } };
+    if (!res.ok || !data.data?.file_key) {
+      throw new Error(`飞书文件上传失败（HTTP ${res.status}）: ${data.msg ?? "未返回 file_key"}`);
+    }
+    return data.data.file_key;
   }
 
   /** 组装发送/回复请求：话题回复走 reply API，根级走 create */
