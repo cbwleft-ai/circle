@@ -7,6 +7,7 @@
  * - mention 占位符清洗：@_user_N → @昵称（bot 自身 mention 剔除）；
  * - 群聊 @ 过滤：开启全量接收权限时，只有 @bot（或私聊）才会进入团队；
  * - 图片消息：调 im/v1/images 下载为附件（失败静默跳过，不阻塞消息）；
+ * - 文件消息：调 im/v1/messages/{message_id}/resources/{file_key} 下载为附件；
  * - 富文本上行（post）：优先读 content_v2 中的 md 标签（保留原始 Markdown），
  *   回退按 content 段落标签还原文本并提取内嵌图片（issue #64）；
  * - 引用/回复消息（issue #66）：事件只带被引用消息 id（`parent_id`），
@@ -77,6 +78,12 @@ export interface FeishuMessageEvent {
   };
 }
 
+/** 飞书文件消息引用（file_key + 原始文件名） */
+export interface FeishuFileRef {
+  fileKey: string;
+  fileName?: string;
+}
+
 /** 归一化后的飞书消息（纯函数输出，便于单测） */
 export interface NormalizedFeishuMessage {
   chatId: string;
@@ -85,6 +92,8 @@ export interface NormalizedFeishuMessage {
   senderId: string;
   text: string;
   imageKeys: string[];
+  /** 文件消息（file_key 需另取下载） */
+  files: FeishuFileRef[];
   messageId: string;
   mentionedBot: boolean;
   /** 被引用/被回复的消息 id（issue #66）：飞书事件 `parent_id`，内容需另取 */
@@ -347,6 +356,7 @@ export function normalizeFeishuMessage(
 
   const mentions = msg.mentions ?? [];
   const imageKeys: string[] = [];
+  const files: FeishuFileRef[] = [];
   let rawText = "";
 
   if (msg.message_type === "text") {
@@ -361,10 +371,18 @@ export function normalizeFeishuMessage(
     const rich = v2.text ? v2 : extractPostContent(parseJsonValue(msg.content));
     rawText = rich.text;
     imageKeys.push(...rich.imageKeys);
+  } else if (msg.message_type === "file") {
+    const content = parseContent(msg.content);
+    if (typeof content.file_key === "string") {
+      files.push({
+        fileKey: content.file_key,
+        fileName: typeof content.file_name === "string" ? content.file_name : undefined,
+      });
+    }
   }
 
   const text = stripMentions(rawText, mentions, opts.botOpenId);
-  if (!text && imageKeys.length === 0) return undefined;
+  if (!text && imageKeys.length === 0 && files.length === 0) return undefined;
 
   const sid = event.sender?.sender_id;
   const senderId = sid?.union_id ?? sid?.open_id ?? sid?.user_id ?? "unknown";
@@ -378,6 +396,7 @@ export function normalizeFeishuMessage(
     senderId: `fs:${senderId}`,
     text,
     imageKeys,
+    files,
     messageId: msg.message_id,
     mentionedBot,
     // parent_id = 被回复/被引用消息 id（飞书「回复」与「引用」同一套语义）；
@@ -574,14 +593,24 @@ export class FeishuAdapter implements ImAdapter {
     return payload;
   }
 
-  /** 归一化消息 → 下载图片附件 → 还原引用内容 → 交给团队 */
+  /** 归一化消息 → 下载图片/文件附件 → 还原引用内容 → 交给团队 */
   private async emitMessage(normalized: NormalizedFeishuMessage): Promise<void> {
     const attachments: ChatAttachment[] = [];
     for (const key of normalized.imageKeys) {
       const att = await this.downloadImage(key);
       if (att) attachments.push(att);
     }
+    const failures: string[] = [];
+    for (const file of normalized.files) {
+      const att = await this.downloadFile(normalized.messageId, file);
+      if (att) attachments.push(att);
+      else failures.push(file.fileName ?? file.fileKey);
+    }
     let text = normalized.text;
+    if (failures.length > 0) {
+      const note = `（文件下载失败：${failures.join("、")}）`;
+      text = text ? `${text}\n${note}` : `收到文件消息，但${note}`;
+    }
     // 引用/回复消息（issue #66）：取回被引用内容并以自然语言前缀注入上下文；
     // 取不到时给出可读兜底，不静默丢失。
     if (normalized.quotedMessageId && normalized.quotedMessageId !== normalized.messageId) {
@@ -625,6 +654,36 @@ export class FeishuAdapter implements ImAdapter {
       return item?.msg_type ? extractQuotedText(item.msg_type, item.body?.content) : undefined;
     } catch (e) {
       log.warn("im:feishu", `被引用消息取回失败: ${(e as Error).message}`);
+      return undefined;
+    }
+  }
+
+  /** 下载文件消息；失败返回 undefined（由调用方给出可见提示） */
+  private async downloadFile(messageId: string, file: FeishuFileRef): Promise<ChatAttachment | undefined> {
+    try {
+      const token = await this.tenantAccessToken();
+      const url =
+        `${this.baseUrl}/open-apis/im/v1/messages/${encodeURIComponent(messageId)}` +
+        `/resources/${encodeURIComponent(file.fileKey)}?type=file`;
+      const res = await this.fetchImpl(url, { headers: { Authorization: `Bearer ${token}` } });
+      if (!res.ok) {
+        log.warn("im:feishu", `文件下载失败（HTTP ${res.status}）: ${file.fileKey}`);
+        return undefined;
+      }
+      const buf = Buffer.from(await res.arrayBuffer());
+      if (buf.length > FEISHU_FILE_MAX_BYTES) {
+        log.warn("im:feishu", `文件过大（${buf.length} 字节）: ${file.fileKey}`);
+        return undefined;
+      }
+      const name = (file.fileName ?? "file.bin").replace(/[\\/:\0]/g, "_");
+      return {
+        kind: "file",
+        name,
+        mimeType: res.headers.get("content-type") ?? "application/octet-stream",
+        data: buf.toString("base64"),
+      };
+    } catch (e) {
+      log.warn("im:feishu", `文件下载异常: ${(e as Error).message}`);
       return undefined;
     }
   }

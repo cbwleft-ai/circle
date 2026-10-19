@@ -9,6 +9,8 @@
  *       → dispatch_task / create_schedule 等工具 → Worker / Scheduler
  * 长程任务 / 定时任务完成 → 团队注入系统通知 → Coordinator 汇报 → IM → 用户
  */
+import { copyFileSync, existsSync, mkdirSync } from "node:fs";
+import { basename, join } from "node:path";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { CoordinatorAgent } from "../agents/coordinator.js";
 import { SchedulerAgent } from "../agents/scheduler.js";
@@ -214,7 +216,12 @@ export class AgentTeam implements TeamGateway {
       if (saved.length > 0) {
         this.pendingAttachments.set(
           this.attachmentKey(convKey, msg.senderId),
-          saved.map((s) => ({ path: s.localPath, mimeType: s.mimeType })),
+          saved.map((s) => ({
+            path: s.localPath,
+            mimeType: s.mimeType,
+            kind: s.kind,
+            name: s.name,
+          })),
         );
         coordinatorText = buildMessageWithAttachments(msg.text, saved);
         log.info("team", `已保存 ${saved.length} 个附件（chat=${msg.chatId}）`);
@@ -406,6 +413,7 @@ export class AgentTeam implements TeamGateway {
     workspace: string,
     notify: boolean,
   ): Promise<string> {
+    task = this.attachTaskInputs(task, workspace);
     this.taskStore.markRunning(task.id);
     try {
       const { result, usage } = await worker.runTask(task, workspace);
@@ -430,6 +438,30 @@ export class AgentTeam implements TeamGateway {
       if (notify) await this.reportCompletion(task, err, true);
       throw e;
     }
+  }
+
+  /**
+   * 把上行附件复制进任务工作空间 inputs/：
+   * Worker 的 read/bash 以任务工作空间为 cwd，直接使用 uploads 的绝对路径可能读不到。
+   */
+  private attachTaskInputs(task: Task, workspace: string): Task {
+    if (!task.attachments || task.attachments.length === 0) return task;
+    const inputDir = join(workspace, "inputs");
+    mkdirSync(inputDir, { recursive: true });
+    const attachments = task.attachments.map((a) => {
+      try {
+        if (!existsSync(a.path)) return a;
+        const dest = join(inputDir, a.name ?? basename(a.path));
+        copyFileSync(a.path, dest);
+        return { ...a, path: dest };
+      } catch (e) {
+        log.warn("team", `附件复制失败（${a.path}）: ${(e as Error).message}`);
+        return a;
+      }
+    });
+    const names = attachments.map((a) => a.name ?? basename(a.path)).join("、");
+    const description = `${task.description}\n\n（附件已放入任务工作空间 inputs/：${names}；可直接用 read/bash 查看。）`;
+    return this.taskStore.update(task.id, { attachments, description }) ?? { ...task, attachments, description };
   }
 
   /** 任务完成/失败 → 注入系统通知 → Coordinator 汇总 → 发送给发起用户 */
@@ -664,7 +696,7 @@ export function buildDispatchWithAttachments(
 ): { description: string; attachments: TaskAttachment[] | undefined } {
   if (!pending || pending.length === 0) return { description, attachments: undefined };
   return {
-    description: `${description}\n\n（用户附带了 ${pending.length} 张图片，已作为图片输入提供，请查看并处理）`,
+    description: `${description}\n\n（用户附带了 ${pending.length} 个附件，将在任务执行时放入工作空间 inputs/，请查看并处理）`,
     attachments: pending,
   };
 }

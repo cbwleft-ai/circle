@@ -59,14 +59,19 @@ npm start
 
 更多接入方式（HTTP / 微信）与配置项见 [docs/usage.md](docs/usage.md)。
 
-## 多模态（图片输入，issue #3）
+## 多模态（图片 + 文件输入，issue #3）
 
 默认模型 `deepseek-flash`（DeepSeek V4.1 Flash）原生支持图片输入，无需额外注册视觉模型。
 
-用户可通过 IM（微信/HTTP）发送图片，图片落盘到 `{dataDir}/uploads/`，随任务派发给 Worker：
+用户可通过 IM（微信/飞书/HTTP）发送图片或文件：
+
+- **图片**：落盘后作为图片输入传给 Worker；
+- **文件**：落盘后复制到 Worker 的 `inputs/` 目录，文本/代码类可直接 `read`，
+  PDF/Office 等由 Worker 用 `bash` 自行处理；
+- 通道上限：飞书约 30MB、微信约 20MB；下载失败会给出文本提示。
 
 ```bash
-# 微信：直接发图片即可（自动下载并传图）
+# 微信/飞书：直接发图片或文件即可（自动下载）
 # HTTP：POST /message 携带 attachments（base64）
 curl -X POST http://localhost:8787/message -H 'Content-Type: application/json' -d '{
   "chatId": "user-1",
