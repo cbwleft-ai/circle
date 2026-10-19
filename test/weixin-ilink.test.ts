@@ -10,12 +10,12 @@
  *   U-23 缓存恢复（重启不重复扫码）
  */
 import { createServer, type Server } from "node:http";
-import { createDecipheriv } from "node:crypto";
+import { createCipheriv, createDecipheriv } from "node:crypto";
 import { mkdtempSync, rmSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runCase, poll, type TestResult } from "./helpers.js";
-import { WeixinIlinkAdapter, jsonParseSafe } from "../src/im/weixin-ilink.js";
+import { WeixinIlinkAdapter, extractAttachments, jsonParseSafe } from "../src/im/weixin-ilink.js";
 
 interface MockServer {
   server: Server;
@@ -658,6 +658,61 @@ export async function runWeixinIlinkTests(): Promise<TestResult[]> {
       } finally {
         await mock.close();
         rmSync(stateDir, { recursive: true, force: true });
+      }
+    }),
+  );
+
+  results.push(
+    await runCase("U-34", "微信官方通道", "文件上行：type 4 下载（明文 / AES 加密）", async (t) => {
+      const plain = Buffer.from("报告正文：全部通过", "utf-8");
+      const key = Buffer.from("0123456789abcdef", "utf-8");
+      const cipher = createCipheriv("aes-128-ecb", key, null);
+      const encrypted = Buffer.concat([cipher.update(plain), cipher.final()]);
+      const server = createServer((req, res) => {
+        const url = new URL(req.url ?? "/", "http://localhost");
+        if (url.pathname === "/file.txt") {
+          res.writeHead(200, { "content-type": "text/plain" });
+          res.end(plain);
+          return;
+        }
+        if (url.pathname === "/download" && url.searchParams.has("encrypted_query_param")) {
+          res.writeHead(200, { "content-type": "application/octet-stream" });
+          res.end(encrypted);
+          return;
+        }
+        res.writeHead(404);
+        res.end("not found");
+      });
+      await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+      const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+      try {
+        const msg = {
+          item_list: [
+            { type: 4, file_item: { file_name: "report.txt", url: `${base}/file.txt` } },
+          ],
+        };
+        const atts = await extractAttachments(msg, base);
+        t.assertEqual(atts.length, 1, "应提取 1 个文件附件");
+        t.assertEqual(atts[0]!.kind, "file", "附件类型应为 file");
+        t.assertEqual(atts[0]!.name, "report.txt", "应保留文件名");
+        t.assertEqual(Buffer.from(atts[0]!.data!, "base64").toString("utf-8"), plain.toString("utf-8"), "明文内容应一致");
+
+        const encMsg = {
+          item_list: [
+            {
+              type: 4,
+              file_item: {
+                file_name: "secret.txt",
+                media: { encrypt_query_param: "p1", aes_key: key.toString("base64") },
+              },
+            },
+          ],
+        };
+        const encAtts = await extractAttachments(encMsg, base, undefined, base);
+        t.assertEqual(encAtts.length, 1, "加密文件应提取成功");
+        t.assertEqual(Buffer.from(encAtts[0]!.data!, "base64").toString("utf-8"), plain.toString("utf-8"), "AES 解密后内容应正确");
+      } finally {
+        await new Promise<void>((r) => server.close(() => r()));
       }
     }),
   );

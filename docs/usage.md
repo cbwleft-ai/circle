@@ -280,6 +280,13 @@ npm start
   `im/v1/files`（得 `file_key`），再发 `image`/`file` 消息；话题场景同样走 `reply + reply_in_thread`；
   图片上限约 10MB（超出按文件发送）、文件上限约 30MB，超限或上传失败时自动降级为文本 + 路径提示。
 
+### 文件消息（上行）
+
+- **飞书**：`file` 消息经 `GET /im/v1/messages/{message_id}/resources/{file_key}?type=file` 下载为附件；
+- **微信 iLink**：`type=4` 文件消息按 `media`（`full_url` / `encrypt_query_param` + `aes_key`）下载并解密；
+- 任务派发时附件复制到 `tasks/<taskId>/inputs/`，Worker 可直接用 `read/bash` 查看原文件；
+  下载失败会以文本提示告知用户，不静默丢弃。
+
 ### 富文本（Markdown）
 
 - **下行**：适配器将回复统一以富文本 `post` + `md` 标签发送，由飞书客户端原生渲染

@@ -734,6 +734,81 @@ export async function runFeishuTests(): Promise<TestResult[]> {
     }),
   );
 
+  results.push(
+    await runCase("F-17", "飞书渠道", "文件消息：归一化 → 资源下载 → 失败可见", async (t) => {
+      const norm = normalizeFeishuMessage({
+        message: {
+          message_id: "om_file1",
+          chat_id: "oc_f",
+          chat_type: "p2p",
+          message_type: "file",
+          content: JSON.stringify({ file_key: "file_v3_1", file_name: "季度报告.txt" }),
+        },
+        sender: { sender_type: "user", sender_id: { open_id: "ou_a" } },
+      });
+      t.assert(!!norm, "纯文件消息不应被丢弃");
+      t.assertEqual(norm!.files, [{ fileKey: "file_v3_1", fileName: "季度报告.txt" }], "应提取 file_key/file_name");
+
+      const got: Array<{ text: string; attachments?: Array<{ kind: string; name?: string; data?: string }> }> = [];
+      const fetchImpl = (async (url: unknown) => {
+        const u = String(url);
+        if (u.includes("app_access_token")) {
+          return new Response(JSON.stringify({ code: 0, tenant_access_token: "t-1", expire: 7200 }), { status: 200 });
+        }
+        if (u.includes("/resources/file_v3_1?type=file")) {
+          return new Response(Buffer.from("报告正文：全部通过", "utf-8"), { status: 200 });
+        }
+        return new Response("forbidden", { status: 403 });
+      }) as unknown as typeof fetch;
+      const adapter = new FeishuAdapter({
+        appId: APP_ID,
+        appSecret: APP_CRED,
+        port: 0,
+        baseUrl: "https://open.feishu.cn",
+        fetchImpl,
+      });
+      adapter.onMessage((m) => got.push(m));
+      await adapter.handleRawEvent({
+        message: {
+          message_id: "om_file1",
+          chat_id: "oc_f",
+          chat_type: "p2p",
+          message_type: "file",
+          content: JSON.stringify({ file_key: "file_v3_1", file_name: "季度报告.txt" }),
+        },
+        sender: { sender_type: "user", sender_id: { open_id: "ou_a" } },
+      });
+      const att = got[0]?.attachments?.[0];
+      t.assert(att?.kind === "file" && att.name === "季度报告.txt", "应转发文件附件");
+      t.assertEqual(Buffer.from(att!.data!, "base64").toString("utf-8"), "报告正文：全部通过", "附件内容应一致");
+
+      // 下载失败：可见文本提示，不静默丢弃
+      const got2: Array<{ text: string }> = [];
+      const failing = new FeishuAdapter({
+        appId: APP_ID,
+        appSecret: APP_CRED,
+        port: 0,
+        baseUrl: "https://open.feishu.cn",
+        fetchImpl: (async (url: unknown) =>
+          String(url).includes("app_access_token")
+            ? new Response(JSON.stringify({ code: 0, tenant_access_token: "t-1", expire: 7200 }), { status: 200 })
+            : new Response("forbidden", { status: 403 })) as unknown as typeof fetch,
+      });
+      failing.onMessage((m) => got2.push(m));
+      await failing.handleRawEvent({
+        message: {
+          message_id: "om_file2",
+          chat_id: "oc_f",
+          chat_type: "p2p",
+          message_type: "file",
+          content: JSON.stringify({ file_key: "file_v3_2", file_name: "broken.pdf" }),
+        },
+        sender: { sender_type: "user", sender_id: { open_id: "ou_a" } },
+      });
+      t.assert(got2[0]!.text.includes("文件下载失败") && got2[0]!.text.includes("broken.pdf"), `失败应可见: ${got2[0]!.text}`);
+    }),
+  );
+
   return results;
 }
 

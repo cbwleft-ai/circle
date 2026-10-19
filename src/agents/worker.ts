@@ -44,6 +44,7 @@ export interface WorkerImageInput {
 
 /**
  * 读取任务附带的图片为模型图片输入（issue #3）。
+ * 只处理图片；文档/压缩包等文件由 Worker 通过 read/bash 读取。
  * 读取失败的文件静默跳过（记录日志），保证单张损坏不阻塞整个任务。
  */
 export function loadTaskImages(
@@ -53,6 +54,7 @@ export function loadTaskImages(
   if (!attachments || attachments.length === 0) return [];
   const images: WorkerImageInput[] = [];
   for (const a of attachments) {
+    if (!isImageAttachment(a)) continue;
     try {
       const buf = fs.readFileSync(a.path);
       images.push({
@@ -65,6 +67,12 @@ export function loadTaskImages(
     }
   }
   return images;
+}
+
+/** 附件是否为图片（kind 优先；旧数据无 kind 时按 mimeType 推断） */
+export function isImageAttachment(a: TaskAttachment): boolean {
+  if (a.kind) return a.kind === "image";
+  return a.mimeType === undefined || a.mimeType.startsWith("image/");
 }
 
 export class WorkerAgent {

@@ -1367,7 +1367,7 @@ export async function runUnitTests(): Promise<TestResult[]> {
       const pending = [{ path: "/tmp/u/a.png", mimeType: "image/png" }];
       const r = buildDispatchWithAttachments("描述图片", pending);
       t.assert(r.attachments === pending, "应透传附件");
-      t.assert(r.description.includes("1 张图片") && r.description.startsWith("描述图片"), "描述应追加图片说明");
+      t.assert(r.description.includes("1 个附件") && r.description.startsWith("描述图片"), "描述应追加附件说明");
       const empty = buildDispatchWithAttachments("普通任务", undefined);
       t.assert(empty.attachments === undefined && empty.description === "普通任务", "无附件应原样返回");
     }),
@@ -1398,6 +1398,70 @@ export async function runUnitTests(): Promise<TestResult[]> {
         const fakeFs = { readFileSync: () => Buffer.from("zzz") };
         const viaFs = loadTaskImages([{ path: png }], fakeFs);
         t.assert(viaFs.length === 1 && viaFs[0]!.data === "enp6", "应使用注入的 fs 读取");
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }),
+  );
+
+  results.push(
+    await runCase("U-53", "文件输入", "loadTaskImages 只加载图片附件（文件交给 read/bash）", async (t) => {
+      const { loadTaskImages } = await import("../src/agents/worker.js");
+      const dir = mkdtempSync(join(tmpdir(), "circle-unit-img-filter-"));
+      try {
+        const png = join(dir, "a.png");
+        const txt = join(dir, "a.txt");
+        writeFileSync(png, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+        writeFileSync(txt, "hello");
+        const images = loadTaskImages([
+          { path: png, kind: "image", mimeType: "image/png" },
+          { path: txt, kind: "file", mimeType: "text/plain" },
+          { path: txt, mimeType: "text/plain" },
+        ]);
+        t.assertEqual(images.length, 1, "只应加载 kind=image 的附件");
+        t.assert(images[0]!.mimeType === "image/png", "应保留图片 MIME");
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }),
+  );
+
+  results.push(
+    await runCase("U-54", "文件输入", "任务附件复制进工作空间 inputs/（Worker 可直接读取）", async (t) => {
+      const { AgentTeam } = await import("../src/team/agent-team.js");
+      const { loadConfig } = await import("../src/config.js");
+      const dir = mkdtempSync(join(tmpdir(), "circle-unit-inputs-"));
+      try {
+        const src = join(dir, "report.txt");
+        const workspace = join(dir, "task");
+        writeFileSync(src, "报告正文", "utf-8");
+        const team = new AgentTeam({
+          config: { ...loadConfig(), dataDir: dir },
+          workers: [],
+          outbox: async () => {},
+          modelRuntime: undefined as never,
+        });
+        const task = {
+          id: "T-TEST-1",
+          title: "分析文件",
+          description: "分析附件",
+          status: "received",
+          priority: "short",
+          workerName: "w",
+          requestedBy: "user",
+          createdAt: Date.now(),
+          attachments: [{ path: src, kind: "file", name: "report.txt", mimeType: "text/plain" }],
+        } as never;
+        const updated = (
+          team as unknown as {
+            attachTaskInputs(task: never, workspace: string): { attachments: Array<{ path: string }>; description: string };
+          }
+        ).attachTaskInputs(task, workspace);
+        const dest = join(workspace, "inputs", "report.txt");
+        t.assert(existsSync(dest), `附件应复制到 inputs/: ${dest}`);
+        t.assertEqual(readFileSync(dest, "utf-8"), "报告正文", "复制内容应一致");
+        t.assertEqual(updated.attachments[0]!.path, dest, "任务附件路径应指向工作空间");
+        t.assert(updated.description.includes("inputs/") && updated.description.includes("report.txt"), `描述应给出位置: ${updated.description}`);
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }

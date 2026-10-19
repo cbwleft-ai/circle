@@ -57,7 +57,7 @@ export interface Task {
   requestChatId?: string;
   /** 发起消息所在线程键（异步结果回流原话题，issue #54） */
   requestThreadKey?: string;
-  /** 用户附带的图片/文件（落盘路径），Worker 执行时作为图片输入传给模型（issue #3） */
+  /** 用户附带的图片/文件（任务工作空间路径）：图片作为模型输入，文件由 Worker 读取（issue #3） */
   attachments?: TaskAttachment[];
   createdAt: number;
   startedAt?: number;
@@ -161,9 +161,13 @@ export interface ChatAttachment {
 
 /** 任务附带的图片/文件（团队层落盘后写入任务，Worker 执行时读取） */
 export interface TaskAttachment {
-  /** 落盘后的绝对路径 */
+  /** 任务工作空间内的绝对路径 */
   path: string;
   mimeType?: string;
+  /** 附件类型；旧数据缺省时按 mimeType 推断（image/* 视为图片） */
+  kind?: "image" | "file";
+  /** 原始文件名（含扩展名） */
+  name?: string;
 }
 
 /** 下行消息目标（话题/线程上下文，issue #54） */

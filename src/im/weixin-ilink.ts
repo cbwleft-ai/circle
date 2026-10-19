@@ -126,6 +126,15 @@ interface WeixinMessageItem {
   voice_item?: { text?: string };
   /** 图片消息（type=2），url 为图片下载地址 */
   image_item?: { url?: string; md5?: string; name?: string; [k: string]: unknown };
+  /** 文件消息（type=4），media 与图片同构（CDN 加密引用） */
+  file_item?: {
+    file_name?: string;
+    name?: string;
+    url?: string;
+    aeskey?: unknown;
+    media?: unknown;
+    [k: string]: unknown;
+  };
   /** 引用消息（quoted message）载荷，字段与腾讯官方 openclaw-weixin 对齐 */
   ref_msg?: RefMessage;
 }
@@ -645,21 +654,39 @@ export async function extractAttachments(
   const items = msg.item_list ?? [];
   const out: ChatAttachment[] = [];
   for (const item of items) {
-    if (item.type !== 2) continue;
-    const ii = item.image_item;
-    if (!ii) continue;
-    const ref = toImageDownloadRef(ii);
-    if (!ref) continue;
-    const img = await downloadImage(baseUrl, ref, token, cdnBase);
-    if (img) {
-      out.push({
-        kind: "image",
-        name: ii.name ?? basenameFromUrl(ref.url ?? ref.media ?? ""),
-        mimeType: img.mimeType,
-        data: img.data,
-      });
-    } else {
-      log.warn("im:weixin", `图片下载失败，跳过附件: ${JSON.stringify(ref).slice(0, 120)}`);
+    if (item.type === 2) {
+      const ii = item.image_item;
+      if (!ii) continue;
+      const ref = toImageDownloadRef(ii);
+      if (!ref) continue;
+      const img = await downloadAttachment(baseUrl, ref, token, cdnBase, "image");
+      if (img) {
+        out.push({
+          kind: "image",
+          name: ii.name ?? basenameFromUrl(ref.url ?? ref.media ?? ""),
+          mimeType: img.mimeType,
+          data: img.data,
+        });
+      } else {
+        log.warn("im:weixin", `图片下载失败，跳过附件: ${JSON.stringify(ref).slice(0, 120)}`);
+      }
+      continue;
+    }
+    if (item.type === 4) {
+      const fi = item.file_item;
+      if (!fi) continue;
+      const ref = toImageDownloadRef(fi);
+      if (!ref) continue;
+      const file = await downloadAttachment(baseUrl, ref, token, cdnBase, "file");
+      if (file) {
+        out.push({
+          kind: "file",
+          name: fi.file_name ?? fi.name ?? basenameFromUrl(ref.url ?? ref.media ?? "") ?? "file.bin",
+          data: file.data,
+        });
+      } else {
+        log.warn("im:weixin", `文件下载失败，跳过附件: ${JSON.stringify(ref).slice(0, 120)}`);
+      }
     }
   }
   return out;
@@ -695,11 +722,12 @@ export function toImageDownloadRef(
   return undefined;
 }
 
-async function downloadImage(
+async function downloadAttachment(
   baseUrl: string,
   ref: ImageDownloadRef,
-  token?: string,
-  cdnBase?: string,
+  token: string | undefined,
+  cdnBase: string | undefined,
+  kind: "image" | "file",
 ): Promise<{ data: string; mimeType?: string } | undefined> {
   // 候选 URL：报文自带 full_url 优先 / url 直链 / CDN 加密下载（多路径尝试）/ CDN key 拼接
   const candidates: string[] = [];
@@ -737,9 +765,10 @@ async function downloadImage(
           continue;
         }
         const buf = Buffer.from(await res.arrayBuffer());
-        const plain = tryDecrypt(buf, ref);
+        const plain = tryDecrypt(buf, ref, kind);
+        if (kind === "file" && hasDecryptKey(ref) && !plain) continue;
         const finalBuf = plain ?? buf;
-        if (!isImageMagic(finalBuf)) {
+        if (kind === "image" && !isImageMagic(finalBuf)) {
           log.debug(
             "im:weixin",
             `图片下载内容非图片（${buf.length} 字节，已尝试解密=${!!ref.aesKey || !!ref.aesKeyHex}）: ${url.slice(0, 120)}`,
@@ -748,7 +777,7 @@ async function downloadImage(
         }
         return {
           data: finalBuf.toString("base64"),
-          mimeType: guessImageMime(finalBuf),
+          mimeType: kind === "image" ? guessImageMime(finalBuf) : undefined,
         };
       } catch (e) {
         log.debug("im:weixin", `图片下载异常（${(e as Error).message}）: ${url.slice(0, 120)}`);
@@ -758,8 +787,18 @@ async function downloadImage(
   return undefined;
 }
 
-/** 依次尝试 aes_key(base64) / aeskey(hex) / 明文，返回第一个通过图片魔数校验的 Buffer */
-function tryDecrypt(buf: Buffer, ref: ImageDownloadRef): Buffer | undefined {
+/** 是否携带 AES 密钥 */
+function hasDecryptKey(ref: ImageDownloadRef): boolean {
+  return Boolean(ref.aesKey || ref.aesKeyHex);
+}
+
+/**
+ * 依次尝试 aes_key(base64) / aeskey(hex)：
+ * - 图片要求解密结果通过图片魔数校验；
+ * - 文件有密钥时必须成功解密，无密钥视为明文。
+ */
+function tryDecrypt(buf: Buffer, ref: ImageDownloadRef, kind: "image" | "file"): Buffer | undefined {
+  if (kind === "file" && !hasDecryptKey(ref)) return buf;
   for (const keyB64 of [ref.aesKey, ref.aesKeyHex ? hexToBase64(ref.aesKeyHex) : undefined]) {
     if (!keyB64) continue;
     try {
@@ -767,7 +806,7 @@ function tryDecrypt(buf: Buffer, ref: ImageDownloadRef): Buffer | undefined {
       if (key.length !== 16) continue;
       const decipher = createDecipheriv("aes-128-ecb", key, null);
       const plain = Buffer.concat([decipher.update(buf), decipher.final()]);
-      if (isImageMagic(plain)) return plain;
+      if (kind === "file" || isImageMagic(plain)) return plain;
     } catch {
       /* 尝试下一个密钥 */
     }
