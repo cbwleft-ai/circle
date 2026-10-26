@@ -82,6 +82,11 @@ export interface ImAdapter {
 
 团队层不感知具体 IM，`AgentTeam` 通过构造时注入的 `outbox` 下发消息。
 
+**下行投递约定**：`send()` / `sendFile()` 必须在消息**确实投递失败**时抛错——
+包括平台以业务错误码返回失败（HTTP 200 + `ret`/`errcode` 非 0）的情况，
+由 `src/index.ts` 的 `outbox` 统一记录 `下行消息投递失败` 日志，`AgentTeam`
+在文件发送失败时降级为文本、在汇报降级也失败时记录错误日志。新通道请勿吞掉投递错误。
+
 ### 2.4 调整安全规则
 
 编辑 `src/core/safety.ts` 的 `DESTRUCTIVE_PATTERNS` / `SENSITIVE_PATTERNS`

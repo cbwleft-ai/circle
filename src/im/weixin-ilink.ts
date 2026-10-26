@@ -34,6 +34,14 @@ const API_TIMEOUT_MS = 15000;
 const LONG_POLL_TIMEOUT_MS = 35000;
 const QR_POLL_INTERVAL_MS = 1000;
 const QR_LOGIN_TIMEOUT_MS = 480000;
+/** 发送失败最大尝试次数（含首次） */
+const SEND_MAX_ATTEMPTS = 3;
+/** 重试基础退避（毫秒，按指数递增） */
+const SEND_RETRY_BASE_MS = 500;
+/** 出站消息回显确认超时（毫秒） */
+const OUTBOUND_ECHO_TIMEOUT_MS = 120_000;
+/** 投递失败死信文件名（位于 stateDir 下） */
+export const WEIXIN_DEAD_LETTER_FILE = "outbox-failed.jsonl";
 
 interface WeixinAccountData {
   token?: string;
@@ -46,6 +54,53 @@ interface WeixinAccountData {
 // ============================================================================
 // 官方 API 客户端（纯 HTTP，零依赖）
 // ============================================================================
+
+/** iLink 业务错误：HTTP 200 但返回体 ret/errcode 表示失败 */
+export class WeixinApiError extends Error {
+  constructor(
+    message: string,
+    readonly ret?: number,
+    readonly errcode?: number,
+  ) {
+    super(message);
+    this.name = "WeixinApiError";
+  }
+
+  /** session 过期（-14）：token 已失效，需重新扫码 */
+  get sessionExpired(): boolean {
+    return this.errcode === -14;
+  }
+}
+
+/**
+ * 校验 iLink 业务返回码。
+ *
+ * iLink 在 HTTP 200 下仍可能返回 ret/errcode 失败（会话过期 -14、未加好友、被限流、
+ * 参数非法等）。不校验就会把「投递失败」当成成功（日志打印「已发送」但用户没收到），
+ * 上层也完全无法感知。
+ */
+export function assertWeixinOk(resp: unknown, api: string): void {
+  const r = (resp ?? {}) as { ret?: unknown; errcode?: unknown; errmsg?: unknown };
+  const ret = typeof r.ret === "number" ? r.ret : undefined;
+  const errcode = typeof r.errcode === "number" ? r.errcode : undefined;
+  if ((ret !== undefined && ret !== 0) || (errcode !== undefined && errcode !== 0)) {
+    throw new WeixinApiError(
+      `微信 ${api} 返回失败 ret=${ret ?? "-"} errcode=${errcode ?? "-"} errmsg=${String(r.errmsg ?? "")}`,
+      ret,
+      errcode,
+    );
+  }
+}
+
+/** 是否为可重试的瞬态错误（网络抖动 / 5xx / 429 / 超时）；业务错误重试无意义 */
+export function isTransientError(err: unknown): boolean {
+  if (err instanceof WeixinApiError) return false;
+  const e = err as { name?: string; message?: string };
+  if (e?.name === "AbortError") return true;
+  return /HTTP (5\d\d|429)\b|fetch failed|network|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|socket hang up/i.test(
+    e?.message ?? "",
+  );
+}
 
 function buildHeaders(token?: string): Record<string, string> {
   const headers: Record<string, string> = {
@@ -176,6 +231,12 @@ export interface WeixinIlinkOptions {
   botType?: string;
   /** 登录状态存储目录（默认 {dataDir}/weixin） */
   stateDir?: string;
+  /** 发送失败最大尝试次数（含首次，默认 3） */
+  sendMaxAttempts?: number;
+  /** 重试基础退避毫秒数（指数递增，默认 500） */
+  sendRetryBaseMs?: number;
+  /** 出站消息回显确认超时毫秒数（默认 120000） */
+  outboundEchoTimeoutMs?: number;
 }
 
 export class WeixinIlinkAdapter implements ImAdapter {
@@ -200,7 +261,15 @@ export class WeixinIlinkAdapter implements ImAdapter {
    * 微信可能把 bot 自己发的消息回显到 getupdates（带 client_id），
    * 此时可把发送文本关联到回显消息的 msg_id，供后续被引用时还原。
    */
-  private pendingOutbound = new Map<string, string>();
+  private pendingOutbound = new Map<string, { text: string; ts: number; chatId: string }>();
+  /** session 是否已过期（-14）：过期后 token 失效，收发均不可用 */
+  private sessionExpired = false;
+
+  /**
+   * session 过期回调（供上层告警/运维介入）。
+   * 注意：此时 token 已失效，无法再通过微信通道通知用户，只能由外部告警。
+   */
+  onSessionExpired?: (reason: string) => void;
 
   constructor(private readonly options: WeixinIlinkOptions = {}) {
     this.apiBaseUrl = options.baseUrl ?? WEIXIN_DEFAULT_BASE_URL;
@@ -208,7 +277,7 @@ export class WeixinIlinkAdapter implements ImAdapter {
 
   /** 登录状态（供测试/状态检查） */
   get connected(): boolean {
-    return this.polling && !!this.token;
+    return this.polling && !!this.token && !this.sessionExpired;
   }
 
   onMessage(cb: (msg: ChatMessage) => void): void {
@@ -247,6 +316,26 @@ export class WeixinIlinkAdapter implements ImAdapter {
   async stop(): Promise<void> {
     this.polling = false;
     this.abort?.abort();
+  }
+
+  /**
+   * session 过期统一处理：停止轮询并回调上层告警。
+   * 此前只打一行 error 日志，通道静默死亡（用户继续发消息也无人处理）。
+   */
+  private handleSessionExpired(reason: string): void {
+    if (this.sessionExpired) return;
+    this.sessionExpired = true;
+    this.polling = false;
+    this.abort?.abort();
+    log.error(
+      "im:weixin",
+      `微信 Session 已过期（${reason}），已停止收消息：请删除 ${this.stateDir()} 后重新扫码登录`,
+    );
+    try {
+      this.onSessionExpired?.(reason);
+    } catch (e) {
+      log.warn("im:weixin", `session 过期回调异常: ${(e as Error).message}`);
+    }
   }
 
   // ============ 扫码登录 ============
@@ -378,8 +467,7 @@ export class WeixinIlinkAdapter implements ImAdapter {
         if (typeof resp.ret === "number" && resp.ret !== 0) {
           log.warn("im:weixin", `getupdates ret=${resp.ret} errcode=${resp.errcode} errmsg=${resp.errmsg}`);
           if (resp.errcode === -14) {
-            log.error("im:weixin", "微信 Session 已过期，请删除 data/weixin 后重新扫码登录");
-            this.polling = false;
+            this.handleSessionExpired("getupdates");
             return;
           }
         }
@@ -389,6 +477,8 @@ export class WeixinIlinkAdapter implements ImAdapter {
             await this.handleIncoming(msg);
           }
         }
+        // 投递确认巡检：超时未回显的出站消息只记日志（平台不一定回显 bot 消息，不能据此判定失败）
+        this.sweepPendingOutbound();
       } catch (err) {
         if ((err as Error).name === "AbortError" || (err as Error).message.includes("abort")) {
           // 长轮询超时是正常现象，继续
@@ -466,11 +556,16 @@ export class WeixinIlinkAdapter implements ImAdapter {
   private recordMessage(msg: WeixinMessage): void {
     this.loadRegistry();
     const msgTs = msg.create_time_ms ?? Date.now();
-    // 出站消息回显：client_id 命中 pendingOutbound → 用发送时的文本登记
+    // 出站消息回显：client_id 命中 pendingOutbound → 用发送时的文本登记（同时视为投递确认）
     let outboundText: string | undefined;
-    if (msg.client_id && this.pendingOutbound.has(msg.client_id)) {
-      outboundText = this.pendingOutbound.get(msg.client_id);
+    const pending = msg.client_id ? this.pendingOutbound.get(msg.client_id) : undefined;
+    if (msg.client_id && pending) {
+      outboundText = pending.text;
       this.pendingOutbound.delete(msg.client_id);
+      log.debug(
+        "im:weixin",
+        `出站消息已确认回显 → ${pending.chatId}（${Math.round((Date.now() - pending.ts) / 1000)}s）`,
+      );
     }
     if (msg.message_id) {
       const text = outboundText ?? rawTextOf(msg);
@@ -490,15 +585,13 @@ export class WeixinIlinkAdapter implements ImAdapter {
     const toUserId = chatId.startsWith("wx:") ? chatId.slice(3) : chatId;
     const clientId = `circle-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     // 登记出站文本，待微信回显（带 client_id）时关联到 msg_id（issue #25）
-    this.pendingOutbound.set(clientId, text);
+    this.pendingOutbound.set(clientId, { text, ts: Date.now(), chatId });
     if (this.pendingOutbound.size > 500) {
       // 防泄漏：只保留最近 500 条待关联出站消息
       const oldest = [...this.pendingOutbound.keys()].slice(0, this.pendingOutbound.size - 500);
       for (const k of oldest) this.pendingOutbound.delete(k);
     }
-    const resp = await postJson(
-      this.apiBaseUrl,
-      "ilink/bot/sendmessage",
+    const resp = await this.sendMessage(
       {
         msg: {
           from_user_id: "",
@@ -510,7 +603,7 @@ export class WeixinIlinkAdapter implements ImAdapter {
         },
         base_info: { channel_version: "1.0.0" },
       },
-      this.token,
+      { chatId, text, clientId },
     );
     log.info("im:weixin", `已发送消息 → ${toUserId}: ${text.slice(0, 120)}`);
     // 平台若回传消息 id，直接登记（供该消息被引用时还原内容）
@@ -519,6 +612,78 @@ export class WeixinIlinkAdapter implements ImAdapter {
       this.loadRegistry();
       this.msgRegistry.set(String(sentId), { text, ts: Date.now() });
       this.pendingOutbound.delete(clientId);
+    }
+  }
+
+  /**
+   * 发送一条 sendmessage 请求（文本/文件共用），带投递反馈：
+   * - 校验业务返回码（HTTP 200 也可能失败），失败抛 WeixinApiError；
+   * - 瞬态错误（网络/5xx/429/超时）按指数退避重试，复用同一 client_id 保证幂等；
+   * - 最终失败写入死信文件 {stateDir}/outbox-failed.jsonl 并抛错（上层可感知）；
+   * - errcode=-14 视为 session 过期，触发 onSessionExpired 告警。
+   */
+  private async sendMessage(
+    payload: { msg: Record<string, unknown>; base_info: Record<string, unknown> },
+    desc: { chatId: string; text: string; clientId: string },
+  ): Promise<any> {
+    const maxAttempts = Math.max(1, this.options.sendMaxAttempts ?? SEND_MAX_ATTEMPTS);
+    const baseMs = Math.max(0, this.options.sendRetryBaseMs ?? SEND_RETRY_BASE_MS);
+    let lastErr: Error | undefined;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        const resp = await postJson(this.apiBaseUrl, "ilink/bot/sendmessage", payload, this.token);
+        assertWeixinOk(resp, "sendmessage");
+        return resp;
+      } catch (e) {
+        lastErr = e as Error;
+        if (lastErr instanceof WeixinApiError && lastErr.sessionExpired) {
+          this.handleSessionExpired("sendmessage");
+          break;
+        }
+        if (!isTransientError(lastErr) || attempt === maxAttempts) break;
+        const delay = baseMs * 2 ** (attempt - 1);
+        log.warn(
+          "im:weixin",
+          `sendmessage 失败（第 ${attempt}/${maxAttempts} 次），${delay}ms 后重试: ${lastErr.message}`,
+        );
+        await sleep(delay);
+      }
+    }
+    const err = lastErr ?? new Error("微信 sendmessage 失败（未知原因）");
+    this.pendingOutbound.delete(desc.clientId);
+    this.recordDeadLetter(desc, err);
+    throw err;
+  }
+
+  /** 投递失败死信（JSONL 追加）：保留原文以便人工补发/排查 */
+  private recordDeadLetter(desc: { chatId: string; text: string; clientId: string }, err: Error): void {
+    const path = join(this.stateDir(), WEIXIN_DEAD_LETTER_FILE);
+    try {
+      const line = JSON.stringify({
+        ts: localTimestamp(),
+        chatId: desc.chatId,
+        clientId: desc.clientId,
+        error: err.message,
+        text: desc.text,
+      });
+      writeFileSync(path, `${line}\n`, { encoding: "utf-8", flag: "a" });
+      log.error("im:weixin", `投递失败已写入死信 ${path} → ${desc.chatId}: ${err.message}`);
+    } catch (e) {
+      log.error("im:weixin", `死信写入失败（消息已丢失）→ ${desc.chatId}: ${(e as Error).message}`);
+    }
+  }
+
+  /** 回显确认巡检：超时未回显只告警（降级为 debug，避免平台不回显时刷屏） */
+  private sweepPendingOutbound(): void {
+    const timeout = this.options.outboundEchoTimeoutMs ?? OUTBOUND_ECHO_TIMEOUT_MS;
+    const now = Date.now();
+    for (const [clientId, entry] of this.pendingOutbound) {
+      if (now - entry.ts < timeout) continue;
+      this.pendingOutbound.delete(clientId);
+      log.debug(
+        "im:weixin",
+        `出站消息 ${Math.round(timeout / 1000)}s 内未收到回显 → ${entry.chatId}: ${entry.text.slice(0, 80)}`,
+      );
     }
   }
 
@@ -563,6 +728,8 @@ export class WeixinIlinkAdapter implements ImAdapter {
       },
       this.token,
     );
+    // 与 sendmessage 一致：HTTP 200 也可能带业务错误码（如未加好友、超限）
+    assertWeixinOk(uploadUrlResp, "getuploadurl");
     const uploadFullUrl = uploadUrlResp?.upload_full_url?.trim();
     const uploadParam = uploadUrlResp?.upload_param;
     if (!uploadFullUrl && !uploadParam) {
@@ -602,21 +769,21 @@ export class WeixinIlinkAdapter implements ImAdapter {
     const item = isImage
       ? { type: 2, image_item: { media, mid_size: filesize } }
       : { type: 4, file_item: { media, file_name: file.fileName, len: String(rawsize) } };
-    await postJson(
-      this.apiBaseUrl,
-      "ilink/bot/sendmessage",
+    // 最终 sendmessage 同样校验业务码：失败则重试/写死信并抛错（上层可降级为文本提示）
+    const clientId = `circle-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    await this.sendMessage(
       {
         msg: {
           from_user_id: "",
           to_user_id: toUserId,
-          client_id: `circle-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+          client_id: clientId,
           message_type: 2,
           message_state: 2,
           item_list: [item],
         },
         base_info: { channel_version: "1.0.0" },
       },
-      this.token,
+      { chatId, text: `[${isImage ? "图片" : "文件"}] ${file.fileName}`, clientId },
     );
     log.info("im:weixin", `已发送文件消息 → ${toUserId}: ${file.fileName}（${rawsize} B, ${isImage ? "图片" : "文件"}）`);
   }

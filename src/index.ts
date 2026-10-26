@@ -44,12 +44,30 @@ async function main(): Promise<void> {
 
   // 选择 IM 适配器
   const adapter = createAdapter(config.imAdapter, config);
+  // 微信 session 过期（-14）等通道级故障：显式告警（token 已失效，无法再通过该通道回复用户）
+  if (adapter instanceof WeixinIlinkAdapter) {
+    adapter.onSessionExpired = (reason) =>
+      log.error(
+        "bootstrap",
+        `微信通道已断开（${reason}）：请重新扫码登录（删除 ${join(config.dataDir, "weixin")} 后重启），期间用户的微信消息不会被处理`,
+      );
+  }
 
   const team = await AgentTeam.create({
     config,
     workers: defaultWorkers(config.dataDir),
     outbox: async (chatId, text, target) => {
-      await adapter.send(chatId, text, target);
+      try {
+        await adapter.send(chatId, text, target);
+      } catch (e) {
+        // 下行投递失败：适配器已重试并写入死信（data/<im>/outbox-failed.jsonl），
+        // 这里补一条固定前缀的错误日志，便于监控/日志告警按关键字捕获
+        log.error(
+          "bootstrap",
+          `下行消息投递失败 → ${chatId}${target?.threadKey ? `#${target.threadKey}` : ""}: ${(e as Error).message}`,
+        );
+        throw e;
+      }
     },
     // 文件附件：适配器支持则直发；不支持（console/http 等）时 AgentTeam 自动降级为文本提示
     sendFile:

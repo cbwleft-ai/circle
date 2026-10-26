@@ -478,10 +478,18 @@ export class AgentTeam implements TeamGateway {
       if (reply) await this.outbox(chatId, reply, { threadKey });
     } catch (e) {
       log.error("team", `任务结果汇报失败: ${(e as Error).message}`);
-      await this.outbox(
-        chatId,
-        `任务 ${task.id} 已${statusWord}（系统自动汇报）：\n${summarizeText(result, { maxChars: 500 })}\n\n完整结果与产出物文件位于 ${this.workspace.taskArtifactRoot(task.workerName, task.id) ?? "产出物目录"}，可随时要求我读取核对。`,
-      );
+      // 降级纯文本重发；若这次也失败，记录并放弃（不能让异常从 catch 里逃逸成未处理拒绝）
+      try {
+        await this.outbox(
+          chatId,
+          `任务 ${task.id} 已${statusWord}（系统自动汇报）：\n${summarizeText(result, { maxChars: 500 })}\n\n完整结果与产出物文件位于 ${this.workspace.taskArtifactRoot(task.workerName, task.id) ?? "产出物目录"}，可随时要求我读取核对。`,
+        );
+      } catch (e2) {
+        log.error(
+          "team",
+          `任务 ${task.id} 结果已无法送达用户 ${chatId}（降级纯文本也失败）: ${(e2 as Error).message}`,
+        );
+      }
     }
   }
 
