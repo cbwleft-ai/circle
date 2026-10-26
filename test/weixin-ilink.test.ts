@@ -8,6 +8,10 @@
  *   U-21 消息接收（长轮询 getupdates → onMessage 回调）
  *   U-22 消息发送（sendmessage + markdown 清洗）
  *   U-23 缓存恢复（重启不重复扫码）
+ *   U-35 投递反馈：业务错误码（HTTP 200 + errcode）抛出而非误报成功
+ *   U-36 投递反馈：瞬态失败（5xx）指数退避重试且复用 client_id
+ *   U-37 投递反馈：重试耗尽后抛错并写入死信文件
+ *   U-38 投递反馈：文件消息 sendmessage 业务失败同样可见
  */
 import { createServer, type Server } from "node:http";
 import { createCipheriv, createDecipheriv } from "node:crypto";
@@ -15,7 +19,13 @@ import { mkdtempSync, rmSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runCase, poll, type TestResult } from "./helpers.js";
-import { WeixinIlinkAdapter, extractAttachments, jsonParseSafe } from "../src/im/weixin-ilink.js";
+import {
+  WeixinIlinkAdapter,
+  WeixinApiError,
+  WEIXIN_DEAD_LETTER_FILE,
+  extractAttachments,
+  jsonParseSafe,
+} from "../src/im/weixin-ilink.js";
 
 interface MockServer {
   server: Server;
@@ -28,6 +38,12 @@ interface MockServer {
   sentClientIds: string[];
   /** 发送的所有消息 item（含文件/图片） */
   sentItems: Array<{ to: string; type: number; item: unknown }>;
+  /** sendmessage 被调用的次数（含失败重试） */
+  sendAttempts: number;
+  /** 每次 sendmessage 携带的 client_id（验证重试复用同一 id） */
+  attemptClientIds: string[];
+  /** 预置的 sendmessage 响应队列（先进先出；用完回退默认 { ret: 0 }） */
+  sendMessageResponses: Array<{ status: number; body: unknown }>;
   /** getuploadurl 请求体 */
   uploadUrlRequests: Array<Record<string, unknown>>;
   /** CDN 上传收到的密文 */
@@ -43,6 +59,9 @@ function createMockWeixinServer(): Promise<MockServer> {
     sentMessages: [],
     sentClientIds: [],
     sentItems: [],
+    sendAttempts: 0,
+    attemptClientIds: [],
+    sendMessageResponses: [],
     uploadUrlRequests: [],
     cdnUploads: [],
   };
@@ -99,6 +118,21 @@ function createMockWeixinServer(): Promise<MockServer> {
         const msg = body.msg ?? {};
         const to = msg.to_user_id ?? "";
         const item = (msg.item_list ?? [])[0];
+        state.sendAttempts++;
+        state.attemptClientIds.push(String(msg.client_id ?? ""));
+        // 预置响应（模拟业务错误 / 瞬时 5xx）优先
+        const scripted = state.sendMessageResponses.shift();
+        if (scripted) {
+          const body = scripted.body as { ret?: number; errcode?: number } | undefined;
+          const ok = scripted.status === 200 && (body?.ret ?? 0) === 0 && (body?.errcode ?? 0) === 0;
+          if (ok) {
+            state.sentMessages.push({ to, text: item?.text_item?.text ?? "" });
+            state.sentClientIds.push(String(msg.client_id ?? ""));
+            state.sentItems.push({ to, type: item?.type ?? 0, item });
+          }
+          send(scripted.status, scripted.body);
+          return;
+        }
         state.sentMessages.push({ to, text: item?.text_item?.text ?? "" });
         state.sentClientIds.push(String(msg.client_id ?? ""));
         state.sentItems.push({ to, type: item?.type ?? 0, item });
@@ -713,6 +747,157 @@ export async function runWeixinIlinkTests(): Promise<TestResult[]> {
         t.assertEqual(Buffer.from(encAtts[0]!.data!, "base64").toString("utf-8"), plain.toString("utf-8"), "AES 解密后内容应正确");
       } finally {
         await new Promise<void>((r) => server.close(() => r()));
+      }
+    }),
+  );
+
+  results.push(
+    await runCase("U-35", "微信官方通道", "投递反馈：HTTP 200 + errcode 视为失败（不再误报已发送）", async (t) => {
+      const mock = await createMockWeixinServer();
+      const stateDir = mkdtempSync(join(tmpdir(), "circle-wx-fail-"));
+      try {
+        const adapter = new WeixinIlinkAdapter({
+          baseUrl: mock.baseUrl,
+          botToken: "mock-bot-token-1",
+          stateDir,
+          sendRetryBaseMs: 1,
+        });
+        const expired: string[] = [];
+        adapter.onSessionExpired = (reason) => expired.push(reason);
+        await adapter.start();
+
+        // 模拟 iLink 的典型失败：HTTP 200，但 ret=0 且 errcode=-14（session 过期）
+        mock.sendMessageResponses.push({ status: 200, body: { ret: 0, errcode: -14, errmsg: "session expired" } });
+
+        let rejected: Error | undefined;
+        await adapter.send("wx:wxuser-1", "这条会失败").catch((e) => (rejected = e as Error));
+
+        t.assert(rejected instanceof WeixinApiError, `应抛 WeixinApiError，实际 ${String(rejected)}`);
+        t.assert(rejected!.message.includes("errcode=-14"), `异常应携带 errcode，实际 ${rejected!.message}`);
+        t.assertEqual(mock.sentMessages.length, 0, "失败响应不应被当作发送成功");
+        t.assertEqual(mock.sendAttempts, 1, "业务错误重试无意义，应只尝试一次");
+        // session 过期：应通知上层并置为未连接
+        t.assertEqual(expired.length, 1, "应触发 onSessionExpired 回调");
+        t.assert(!adapter.connected, "session 过期后应标记为未连接");
+        // 死信留存原文
+        const dead = join(stateDir, WEIXIN_DEAD_LETTER_FILE);
+        t.assert(existsSync(dead), "投递失败应写入死信文件");
+        const lines = readFileSync(dead, "utf-8").trim().split("\n").map((l) => JSON.parse(l));
+        t.assert(lines.length === 1, `死信应有 1 条，实际 ${lines.length}`);
+        t.assertEqual(lines[0].chatId, "wx:wxuser-1", "死信应记录会话");
+        t.assertEqual(lines[0].text, "这条会失败", "死信应保留原文");
+        await adapter.stop();
+      } finally {
+        await mock.close();
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    }),
+  );
+
+  results.push(
+    await runCase("U-36", "微信官方通道", "投递反馈：瞬态 5xx 退避重试且复用同一 client_id", async (t) => {
+      const mock = await createMockWeixinServer();
+      const stateDir = mkdtempSync(join(tmpdir(), "circle-wx-retry-"));
+      try {
+        const adapter = new WeixinIlinkAdapter({
+          baseUrl: mock.baseUrl,
+          botToken: "mock-bot-token-1",
+          stateDir,
+          sendRetryBaseMs: 1,
+        });
+        await adapter.start();
+
+        // 前两次 5xx（瞬态），第三次成功
+        mock.sendMessageResponses.push(
+          { status: 500, body: { error: "boom" } },
+          { status: 500, body: { error: "boom" } },
+        );
+        await adapter.send("wx:wxuser-1", "重试后应该成功");
+
+        t.assertEqual(mock.sendAttempts, 3, "应尝试 3 次（2 次失败 + 1 次成功）");
+        t.assertEqual(mock.sentMessages.length, 1, "最终应成功投递 1 条");
+        // 重试必须复用同一 client_id，否则平台可能判为两条消息
+        t.assertEqual(new Set(mock.attemptClientIds).size, 1, "重试应复用同一 client_id（幂等）");
+        t.assert(!existsSync(join(stateDir, WEIXIN_DEAD_LETTER_FILE)), "最终成功不应写死信");
+        await adapter.stop();
+      } finally {
+        await mock.close();
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    }),
+  );
+
+  results.push(
+    await runCase("U-37", "微信官方通道", "投递反馈：重试耗尽后抛错并写死信", async (t) => {
+      const mock = await createMockWeixinServer();
+      const stateDir = mkdtempSync(join(tmpdir(), "circle-wx-dead-"));
+      try {
+        const adapter = new WeixinIlinkAdapter({
+          baseUrl: mock.baseUrl,
+          botToken: "mock-bot-token-1",
+          stateDir,
+          sendRetryBaseMs: 1,
+        });
+        await adapter.start();
+
+        for (let i = 0; i < 5; i++) mock.sendMessageResponses.push({ status: 503, body: { error: "down" } });
+
+        let rejected: Error | undefined;
+        await adapter.send("wx:wxuser-1", "重试也失败").catch((e) => (rejected = e as Error));
+
+        t.assert(rejected !== undefined, "重试耗尽后应抛错");
+        t.assertEqual(mock.sendAttempts, 3, "默认最多尝试 3 次");
+        const dead = join(stateDir, WEIXIN_DEAD_LETTER_FILE);
+        t.assert(existsSync(dead), "重试耗尽应写死信");
+        const lines = readFileSync(dead, "utf-8").trim().split("\n").map((l) => JSON.parse(l));
+        t.assertEqual(lines.length, 1, "死信应有 1 条（不因重试重复写入）");
+        t.assertEqual(lines[0].text, "重试也失败", "死信应保留原文");
+        t.assert(String(lines[0].error).includes("503"), `死信应记录错误详情，实际 ${lines[0].error}`);
+        await adapter.stop();
+      } finally {
+        await mock.close();
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    }),
+  );
+
+  results.push(
+    await runCase("U-38", "微信官方通道", "投递反馈：文件消息 sendmessage 业务失败同样可见", async (t) => {
+      const mock = await createMockWeixinServer();
+      const stateDir = mkdtempSync(join(tmpdir(), "circle-wx-filefail-"));
+      try {
+        const adapter = new WeixinIlinkAdapter({
+          baseUrl: mock.baseUrl,
+          botToken: "mock-bot-token-1",
+          stateDir,
+          sendRetryBaseMs: 1,
+        });
+        await adapter.start();
+
+        // 上传成功，但最终投递被平台拒绝（HTTP 200 + errcode）
+        mock.sendMessageResponses.push({ status: 200, body: { ret: 0, errcode: -1, errmsg: "not friend" } });
+
+        const content = Buffer.from("产出物正文", "utf-8");
+        let rejected: Error | undefined;
+        await adapter
+          .sendFile("wx:wxuser-1", {
+            fileName: "report.md",
+            content,
+            size: content.length,
+            mimeType: "text/markdown",
+          })
+          .catch((e) => (rejected = e as Error));
+
+        t.assert(rejected instanceof WeixinApiError, `应抛 WeixinApiError，实际 ${String(rejected)}`);
+        t.assert(rejected!.message.includes("errcode=-1"), `异常应携带 errcode，实际 ${rejected!.message}`);
+        const dead = join(stateDir, WEIXIN_DEAD_LETTER_FILE);
+        t.assert(existsSync(dead), "文件投递失败也应写死信");
+        const lines = readFileSync(dead, "utf-8").trim().split("\n").map((l) => JSON.parse(l));
+        t.assert(String(lines[0].text).includes("report.md"), `死信应记录文件名，实际 ${lines[0].text}`);
+        await adapter.stop();
+      } finally {
+        await mock.close();
+        rmSync(stateDir, { recursive: true, force: true });
       }
     }),
   );
