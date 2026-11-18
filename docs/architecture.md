@@ -28,7 +28,7 @@ Circle 采用「单一入口 + 角色分离」的协作架构。使用者只感�
                                └──────────────────────────────┘
 ```
 
-> 各消息流的**时序图**见第 3 节：长程任务完整时序（含后台执行/成功/失败/轮次检查）见 [3.2](#32-长程任务)。
+> 各消息流的**时序图**见第 3 节：任务执行完整时序（含后台执行/成功/失败/轮次检查）见 [3.2](#32-任务执行与完成汇报)。
 
 ## 2. 角色实现
 
@@ -53,8 +53,8 @@ Circle 采用「单一入口 + 角色分离」的协作架构。使用者只感�
 | `read_artifact` | 读取任务**产出物文件**内容（只读、受限） | `WorkspaceManager.readTaskArtifact` |
 | `send_artifact` | 把任务**产出物文件**发送给用户（附件，≤20MB） | `TeamGateway.sendArtifact` → `ImAdapter.sendFile` |
 
-- 系统提示词中固化角色边界与安全规则（拒绝破坏性/敏感请求、长程任务先确认等）；
-- **长程任务处理**：`dispatch_task(long=true)` 后工具立即返回
+- 系统提示词中固化角色边界与安全规则（拒绝破坏性/敏感请求、任务先确认等）；
+- **任务处理**：`dispatch_task` 后工具立即返回
   「任务已收到 + 任务编号」，任务在后台执行；完成时团队注入系统通知，
   Coordinator 整理后主动向用户汇报；
 - **每 5 轮对话检查任务状态**：`AgentTeam` 记录对话轮次，每满 5 轮且有
@@ -72,7 +72,7 @@ Circle 采用「单一入口 + 角色分离」的协作架构。使用者只感�
   - 完成后工作空间归档为产出物目录 `outputs/<taskId>/`（持久保留，便于取用，
     归档时移除技能软链接保持产出纯净），任务工作空间随任务记录 30 天清理；
 - 每个任务使用**独立 LLM 会话**（上下文干净）；
-- 短程任务：执行后直接返回结果；长程任务：团队先下发 ack，执行完成后再反馈；
+- 所有任务：团队先下发 ack，Worker 后台执行，完成后回流汇报；
 - 单任务超时保护（默认 30 分钟，可配置）。
 
 ### 2.3 Scheduler（`src/agents/scheduler.ts`）
@@ -90,22 +90,28 @@ Circle 采用「单一入口 + 角色分离」的协作架构。使用者只感�
 
 ## 3. 消息流
 
-### 3.1 短程任务
+### 3.1 任务派发（统一异步）
+
+所有任务（无论预计耗时长短）都采用「先确认、后汇报」，不再同步等待执行结果：
 
 ```
 用户 ─► IM ─► AgentTeam.handleUserMessage
       ├─ 安全评估（通过）
       ├─ Coordinator.respond（LLM 调用 dispatch_task）
       │    └─ TeamGateway.dispatch
-      │         ├─ 安全复核 → TaskStore 入库 → Worker 执行（同步等待）
-      │         └─ 工具返回值（含结果）
-      └─ Coordinator 整理结果 → IM → 用户
+      │         ├─ 安全复核 → TaskStore 入库
+      │         ├─ 立即返回 ack（任务编号）
+      │         └─ 后台执行 Worker.runTask（不阻塞用户对话）
+      └─ Coordinator 整理 ack → IM → 用户
+...（后台执行完成）
+      └─ 团队注入系统通知 → Coordinator 整理结果 → IM → 用户
 ```
 
-### 3.2 长程任务
+### 3.2 任务执行与完成汇报
 
-流程概述：`dispatch_task(long=true)` 后工具**立即返回**「任务已收到 + 任务编号」，
-任务转入后台异步执行；完成/失败时团队注入系统通知，Coordinator 整理后主动向用户汇报。
+流程概述：`dispatch_task` 后工具**立即返回**「任务已收到 + 任务编号」，
+任务统一转入后台异步执行；完成/失败时团队注入系统通知，Coordinator 整理后主动向用户汇报。
+`long=true` 仅用于预计耗时提示，不改变执行方式。
 用户等待期间可继续对话，系统每 N 轮（默认 5 轮）自动检查一次待办任务进展。
 
 ```mermaid
@@ -119,16 +125,16 @@ sequenceDiagram
     participant W as Worker<br/>(LLM 会话 · 独立工作目录)
     participant WS as Workspace
 
-    U->>IM: 发起长程任务请求（下载/爬取/批量/编译/渲染等）
+    U->>IM: 发起任务请求（长程任务如下载/爬取/批量/编译/渲染等）
     IM->>T: handleUserMessage(消息)
     T->>T: ① 入口安全评估<br/>（破坏性/敏感 → 直接拒绝，不进入 LLM）
     T->>C: coordinator.respond(用户消息)
-    C->>C: LLM 判断为长程任务<br/>→ 调用 dispatch_task(long=true)
+    C->>C: LLM 判断任务类型<br/>→ 调用 dispatch_task
     C->>T: 工具回调 dispatch(worker, title, desc, long)
     T->>T: ② 派发入口二次安全复核<br/>（LLM 误判也无法绕过）
-    T->>S: create() → status=received, priority=long
+    T->>S: create() → status=received, priority=long/short
     T->>WS: 创建任务专属工作空间 tasks/<taskId>/（会话 cwd）
-    Note over T,W: 长程任务：立即 ack，后台异步执行，不等待结果
+    Note over T,W: 所有任务：立即 ack，后台异步执行，不等待结果
     T-->>C: 工具返回「任务已收到 + 任务编号」
     C-->>T: 整理 ack 文案
     T-->>IM: outbox(ack)
@@ -173,7 +179,7 @@ sequenceDiagram
 ```
 
 > 说明：`C->>T` 的 `list_tasks` 查询与 `T-->>C` 的状态摘要在实现中均为
-> `AgentTeam` 的同步方法调用（非 LLM 回合），此处为便于阅读合并展示；
+> `AgentTeam` 的普通方法调用（非 LLM 回合），此处为便于阅读合并展示；
 > 定时任务（见 3.3）触发后同样复用「创建 Task → executeTask → reportCompletion」链路，
 > 区别仅在于任务来源为 Scheduler 且汇报文案带 scheduleId。
 >

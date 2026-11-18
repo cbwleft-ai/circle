@@ -7,7 +7,7 @@
  *       → 安全评估（破坏性/敏感 → 直接拒绝）
  *       → Coordinator（LLM，仅对话）
  *       → dispatch_task / create_schedule 等工具 → Worker / Scheduler
- * 长程任务 / 定时任务完成 → 团队注入系统通知 → Coordinator 汇报 → IM → 用户
+ * 任务 / 定时任务完成 → 团队注入系统通知 → Coordinator 汇报 → IM → 用户
  */
 import { copyFileSync, existsSync, mkdirSync } from "node:fs";
 import { basename, join } from "node:path";
@@ -370,48 +370,29 @@ export class AgentTeam implements TeamGateway {
 
     const workspace = this.workspace.taskWorkspaceDir(workerName, task.id);
 
-    if (long) {
-      // 长程任务：立即 ack，异步执行
-      void this.executeTask(task, worker, workspace, true);
-      return {
-        ok: true,
-        task,
-        async: true,
-        message: `任务已收到。任务编号 ${task.id}「${title}」已派发给 Worker「${workerName}」，预计运行超过 ${this.config.longTaskThresholdSec} 秒，完成后我会主动向你汇报。`,
-      };
-    }
-
-    // 短程任务：同步执行（结果直接在工具返回值中带出，由 Coordinator 在当轮汇报，不再触发独立通知）
-    try {
-      const result = await this.executeTask(task, worker, workspace, false);
-      return {
-        ok: true,
-        task,
-        async: false,
-        message: `任务 ${task.id}「${title}」已完成。\n\n${result}`,
-      };
-    } catch (e) {
-      const err = (e as Error).message;
-      this.taskStore.markFailed(task.id, err);
-      return {
-        ok: true,
-        task,
-        async: false,
-        message: `任务 ${task.id}「${title}」执行失败：${err}`,
-      };
-    }
+    // 统一异步：所有任务都立即 ack，Worker 在后台执行，完成后通过系统通知回流。
+    // 这里不等待执行结果，避免 Coordinator 回合被 Worker 阻塞。
+    void this.executeTask(task, worker, workspace).catch((e) => {
+      log.error("team", `任务 ${task.id} 后台执行异常: ${(e as Error).message}`);
+    });
+    const estimate = long
+      ? `，预计运行超过 ${this.config.longTaskThresholdSec} 秒`
+      : "";
+    return {
+      ok: true,
+      task,
+      message: `任务已收到。任务编号 ${task.id}「${title}」已派发给 Worker「${workerName}」${estimate}，完成后我会主动向你汇报。`,
+    };
   }
 
   /**
    * 执行任务（更新状态 + 完成后归档产出物 + 通知 Coordinator 汇报）。
-   * notify=true 适用于长程/定时任务（在非 Coordinator 回合中异步执行）；
-   * notify=false 适用于短程任务（结果随工具返回值返回，避免递归触发 Coordinator 回合）。
+   * 由 dispatch / Scheduler 在后台调用，执行完成或失败都通过系统通知回流。
    */
   private async executeTask(
     task: Task,
     worker: WorkerAgent,
     workspace: string,
-    notify: boolean,
   ): Promise<string> {
     task = this.attachTaskInputs(task, workspace);
     this.taskStore.markRunning(task.id);
@@ -428,14 +409,14 @@ export class AgentTeam implements TeamGateway {
       } catch (e) {
         log.warn("team", `任务 ${task.id} 产出物归档失败: ${(e as Error).message}`);
       }
-      if (notify) await this.reportCompletion(task, report, false);
+      await this.reportCompletion(task, report, false);
       return report;
     } catch (e) {
       const err = (e as Error).message;
       this.taskStore.markFailed(task.id, err);
       log.error("team", `任务 ${task.id} 失败: ${err}`);
       // 失败任务的工作空间保留在 tasks/<taskId> 便于排查，由 30 天清理兜底
-      if (notify) await this.reportCompletion(task, err, true);
+      await this.reportCompletion(task, err, true);
       throw e;
     }
   }
@@ -667,7 +648,7 @@ export class AgentTeam implements TeamGateway {
     this.scheduleStore.addTaskRecord(schedule.id, task.id);
     const workspace = this.workspace.taskWorkspaceDir(schedule.workerName, task.id);
     try {
-      const result = await this.executeTask(task, worker, workspace, true);
+      const result = await this.executeTask(task, worker, workspace);
       return { taskId: task.id, result };
     } catch (e) {
       return { taskId: task.id, error: (e as Error).message };

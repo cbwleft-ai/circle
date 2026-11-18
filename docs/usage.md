@@ -60,14 +60,16 @@ npm run dev                   # 开发模式（文件变更自动重启）
 Coordinator：你好！我是 Circle 系统的协调者，负责帮你派发任务、管理定时任务并汇报结果……
 ```
 
-### 3.2 短程任务（直接返回结果）
+### 3.2 任务派发（统一异步：先确认，完成后汇报）
 
 ```
-你：请派一个短程任务给 default Worker：执行 echo hello > hello.txt 并读取内容汇报。
+你：请派一个任务给 default Worker：执行 echo hello > hello.txt 并读取内容汇报。
+Coordinator：任务已收到。任务编号 T-20260813-0001 已派发，完成后我会主动汇报。
+...（几秒后）
 Coordinator：任务 T-20260813-0001 已完成。执行内容：…，产出文件 data/workspaces/default/hello.txt
 ```
 
-### 3.3 长程任务（先确认收到，完成后主动汇报）
+### 3.3 长程任务（同样先确认，完成后主动汇报）
 
 ```
 你：请派一个长程任务给 default Worker：写脚本 sleep 15 秒后输出结果到 result.txt。
@@ -331,7 +333,7 @@ npm start
 | `CIRCLE_MODEL_ID` | `deepseek-flash` | 模型 id |
 | `CIRCLE_COORDINATOR_THINKING` | `low` | Coordinator 思考级别 |
 | `CIRCLE_WORKER_THINKING` | `high` | Worker 思考级别 |
-| `CIRCLE_LONG_TASK_SEC` | `10` | 长程任务判定阈值（秒） |
+| `CIRCLE_LONG_TASK_SEC` | `10` | 长程任务判定阈值（秒，仅用于确认回复中的预计耗时提示） |
 | `CIRCLE_STATUS_CHECK_INTERVAL` | `5` | Coordinator 每 N 轮检查待办任务 |
 | `CIRCLE_MESSAGE_MERGE_MS` | `1500` | 附件消息合并窗口（毫秒）：收到图片/文件后，窗口内的后续消息合并为一批，Coordinator 只回复一次；纯文本消息零延迟；`0` = 关闭合并 |
 | `CIRCLE_SCHEDULER_TICK_MS` | `30000` | Scheduler tick 间隔（毫秒） |
