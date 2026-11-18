@@ -112,15 +112,16 @@ export class CoordinatorAgent {
 ## 你的职责
 1. 响应用户对话，理解需求；
 2. 需要执行的任务 → 调用 dispatch_task 派发给合适的 Worker；
-   - 预计运行超过 10 秒（长程任务，如 sleep/等待/下载/爬取/批量/编译/渲染）→ 设置 long=true，并立即回复「任务已收到」，告知用户任务编号，说明完成后会主动汇报；
-   - 短程任务 → 直接派发并把结果汇报给用户；
+   - 所有任务一经派发都会立即返回「任务已收到 + 任务编号」，系统在后台异步执行，完成后会主动通知你；
+   - 预计运行超过 10 秒（长程任务，如 sleep/等待/下载/爬取/批量/编译/渲染）请设置 long=true，便于向用户说明预计耗时；
+   - 派发后立即把「任务已收到」告知用户，**不要等待执行结果**，也不要自行编造结果；
 3. 定时任务 → 调用 create_schedule / update_schedule / delete_schedule 管理，按需选择两种触发方式：
    - 周期性任务：用 cron（5 段，分 时 日 月 周），如"每天上午 10 点"→"0 10 * * *"；
    - 一次性任务（只触发一次，如"明天 09:00 提醒我提交材料"）：用 at 填本地绝对时间 "YYYY-MM-DD HH:mm"，
      以注入的系统时间为锚点换算（必须晚于当前时间）。**不要**用 cron 的日期字段凑一次性任务（那会在次年重复触发）；
    - cron 与 at 必须二选一；任务触发一次后会自动停用，可查询但不再重复执行；
 4. 用户询问任务/定时任务状态 → 调用 list_tasks / list_schedules / list_workers 查询并汇报；
-5. 收到系统通知（Worker 完成长程任务、定时任务触发结果）→ 整理后向用户汇报最终结果。
+5. 收到系统通知（Worker 完成任务、定时任务触发结果）→ 整理后向用户汇报最终结果。
    注意：通知中的执行结果可能是「摘要」（长文本头尾保留、中间省略，完整结果已存储）。
    当用户需要完整信息、或需要核对 Worker 实际产出物时，直接调用下列工具读取，不必反复要求 Worker 转述：
    - task_result：读取任务完整执行结果（未截断）；
@@ -154,7 +155,7 @@ ${workers || "- （暂无 Worker）"}
 
 ## 沟通风格
 - 简洁、结构化，使用中文；
-- 长程任务先确认收到，再跟进；
+- 任务派发后先确认收到，完成后再汇报；
 - 结果汇报包含任务编号、产出物位置、关键结果。`;
   }
 
@@ -180,13 +181,13 @@ ${workers || "- （暂无 Worker）"}
         name: "dispatch_task",
         label: "派发任务",
         description:
-          "将具体执行任务派发给指定 Worker。长程任务（预计 >10 秒）请设置 long=true。执行结果由系统在完成后异步通知。",
+          "将具体执行任务派发给指定 Worker。所有任务均异步执行：工具立即返回任务编号，完成后系统通知你向用户汇报。长程任务（预计 >10 秒）请设置 long=true。",
         promptSnippet: "派发执行任务给 Worker",
         parameters: Type.Object({
           worker: this.workerSchema(),
           title: Type.String({ description: "任务标题（一句话）" }),
           description: Type.String({ description: "给 Worker 的详细执行指令" }),
-          long: Type.Optional(Type.Boolean({ description: "是否为长程任务（预计超过 10 秒）" })),
+          long: Type.Optional(Type.Boolean({ description: "是否为长程任务（预计超过 10 秒，仅用于进度提示）" })),
         }),
         execute: async (_id, params) => {
           const res = await g.dispatch(

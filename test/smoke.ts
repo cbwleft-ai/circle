@@ -21,7 +21,6 @@ async function main() {
     ],
     dispatch: async (): Promise<DispatchResult> => ({
       ok: true,
-      async: false,
       task: {
         id: "T-SMOKE-0001",
         title: "x",

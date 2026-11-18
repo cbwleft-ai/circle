@@ -219,8 +219,7 @@ export type DispatchResult =
   | {
       ok: true;
       task: Task;
-      /** true 表示长程任务已 ack，结果稍后异步送达 */
-      async: boolean;
+      /** 任务已 ack，结果稍后由系统通知送达 */
       message: string;
     }
   | {

@@ -1,5 +1,5 @@
 /**
- * 用例 1：用户提交长程任务（+ 短程任务回归）
+ * 用例 1：用户提交长程任务（+ 短程任务异步回归）
  *
  * 验证目标：
  * - Coordinator 接收任务并回复「任务已收到」（确认到达）；
@@ -7,7 +7,7 @@
  * - Worker 执行（>10s）并反馈结果；
  * - Coordinator 汇总结果后回复用户；
  * - 用户只与 Coordinator 对话（Worker 不直接面向用户）；
- * - 短程任务在同一轮对话中直接返回结果（无递归汇报 bug）。
+ * - 所有任务统一异步：先确认收到，完成后由系统通知 Coordinator 汇报。
  */
 import {
   mkdtempSync,
@@ -134,7 +134,7 @@ export async function runCase1(): Promise<TestResult[]> {
     await runCase(
       "C1-02",
       "用例1: 短程任务",
-      "用户提交短程任务：直接返回结果（无递归汇报 bug）",
+      "用户提交短程任务：先确认收到，完成后异步汇报（无递归汇报 bug）",
       async (t) => {
         const dataDir = mkdtempSync(join(tmpdir(), "circle-case1-short-"));
         const { team, adapter } = await createTestTeam({
@@ -149,15 +149,29 @@ export async function runCase1(): Promise<TestResult[]> {
         });
         try {
           const t0 = Date.now();
+          const sentBefore = adapter.sent.length;
           await adapter.inject(
             "console",
             `请派一个短程任务给 dev Worker：执行 echo SHORT_OK_2025 > short.txt，然后读取 short.txt 内容汇报。`,
           );
-          // 短程任务应在同一轮对话中直接返回结果
-          const reply = await adapter.waitFor((x) => x.includes("SHORT_OK_2025"), {
-            timeoutMs: 180_000,
-            since: Date.now() - 1000,
-          });
+          // 短程任务同样先 ack，不再同步等待结果
+          const ackText = await poll(
+            () => adapter.sent.find((s) => s.ts >= sentBefore)?.text ?? undefined,
+            { timeoutMs: 180_000, intervalMs: 500, msg: "短程任务确认（第一条回复）" },
+          );
+          const ackTs = adapter.sent.find((s) => s.ts >= sentBefore)!.ts;
+          t.assert(
+            ackText.includes("任务") || ackText.includes("Worker") || ackText.includes("收到"),
+            "第一条回复应为任务确认",
+          );
+          t.log(`[${((Date.now() - t0) / 1000).toFixed(1)}s] 短程任务确认: ${ackText.slice(0, 160)}…`);
+          // 执行完成后结果由独立通知回流
+          const reply = await poll(
+            () =>
+              adapter.sent.find((s) => s.ts > ackTs && s.text.includes("SHORT_OK_2025"))?.text ??
+              undefined,
+            { timeoutMs: 180_000, intervalMs: 500, msg: "短程任务结果（独立通知）" },
+          );
           t.log(`[${((Date.now() - t0) / 1000).toFixed(1)}s] 短程任务结果: ${reply.slice(0, 200)}…`);
           await poll(
             () =>
@@ -167,7 +181,7 @@ export async function runCase1(): Promise<TestResult[]> {
               undefined,
             { timeoutMs: 30_000, msg: "短程任务应完成" },
           );
-          t.assert(adapter.sent.length >= 1, "应收到结果回复");
+          t.assert(adapter.countAfter(sentBefore) >= 2, "应收到确认与结果两条回复（不再同步返回）");
           t.log("短程任务状态已标记 completed。");
         } finally {
           await team.stop();

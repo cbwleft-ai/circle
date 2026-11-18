@@ -6,8 +6,7 @@
  *   data/workspaces/<workerName>/tasks/<taskId>/，任务之间互不可见、互不影响；
  * - Worker 的持久目录仅存放技能/配置，不再作为任务执行目录；
  * - 任务完成后，其工作空间由团队层归档为产出物目录 outputs/<taskId>/（持久保留）；
- * - 短程任务：执行后直接返回结果；
- * - 长程任务：先返回「任务已收到」（由团队层立即 ack），执行完成后再反馈结果。
+ * - 统一异步：团队层先向用户 ack「任务已收到」，执行完成后再反馈结果。
  */
 import { mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";

@@ -114,8 +114,7 @@ export interface ImAdapter {
 | 派发入口二次安全复核 | 兜底 LLM 误判 |
 | Scheduler 为确定性实现 | 定时触发必须可靠，不引入 LLM 延迟/不确定性 |
 | 每个任务独立 Worker 会话 | 上下文干净、可并发、互不影响 |
-| 短程任务不触发独立结果通知 | 避免 Coordinator 会话递归（工具返回值已含结果） |
-| 长程任务先 ack 后异步执行 | 用户无需等待，完成后主动汇报 |
+| 所有任务统一异步执行 | 派发后立即 ack，不阻塞用户对话；完成/失败通过系统通知回流 |
 
 ## 4. 常见二次开发任务
 
@@ -161,7 +160,7 @@ pi.registerProvider("my-llm", {
 ## 5. 测试开发
 
 - 单元测试：`test/unit.test.ts`（确定性，无 API key 也可运行）；
-- 端到端用例：`test/case1-long-task.test.ts`（长程/短程任务）、
+- 端到端用例：`test/case1-long-task.test.ts`（长程任务与短程任务异步回归）、
   `test/case2-scheduled-task.test.ts`（定时任务）、
   `test/case3-safety-intercept.test.ts`（安全拦截）；
 - 测试基础设施：`test/helpers.ts`（runCase / createTestTeam / poll / renderReport）；

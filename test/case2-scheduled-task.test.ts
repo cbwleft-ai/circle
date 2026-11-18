@@ -5,7 +5,7 @@
  * - Coordinator 解析需求并转交 Scheduler 创建定时任务；
  * - 到达触发时间后 Scheduler 向 Worker 下发执行；
  * - Worker 完成后结果返回 Scheduler，再由 Scheduler 反馈给 Coordinator；
- * - Coordinator 向用户同步最终结果；
+ * - Coordinator 向用户汇报最终结果；
  * - 定时任务支持删除。
  */
 import { mkdtempSync } from "node:fs";
